@@ -1,0 +1,58 @@
+---
+description: Diagnose routing, pressure, timeout and relay failures with bounded aggregate data.
+---
+
+# Diagnostics workflow
+
+Validate configuration and descriptor budget first:
+
+```sh
+zigveil --check /etc/zigveil/config.json
+systemctl status zigveil --no-pager
+journalctl -u zigveil -n 100 --no-pager
+kill -USR1 "$PID"
+```
+
+Use an explicit PID for each process. SIGUSR1 writes one JSON snapshot to stderr;
+periodic snapshots are optional. No packet logging or admin listener is available.
+
+Hostname backends resolve once during startup and `--check`, using the environment's
+hosts/resolver files. Resolution errors prevent listening; a DNS change requires a
+restart. The selected IPv4 (otherwise IPv6) still undergoes self-target checks.
+
+| Counter | Investigate |
+| --- | --- |
+| `unknown_sni` / `missing_sni` | Client's visible name and configured route/fallback |
+| `invalid_client_hello` | Framing, name syntax, 64 KiB / 64-record admission limits |
+| `connect_failures` | Selected target IP, routing/firewall and backend listener |
+| `rejected` | Connection or staging capacity and descriptor resources |
+| `accept_errors` | Pending connection errors or fd/memory pressure; only resource pressure backs off |
+| `timeouts` | Absolute hello/connect/prefix or established idle deadline |
+| `io_errors` | Aggregate fatal socket outcomes; inspect side/operation and cause below |
+| forwarded bytes | Successful sends including the original hello; not queued-byte estimates |
+
+For `io_errors`, use the [README counter tables](../../README.md#clienthello-and-security-limits).
+`client_*` / `backend_*` name the actual socket: a forward send is a backend write,
+not a client write. `*_socket_errors` is a failed SO_ERROR probe or the pending errno
+it retrieved; it is not proof that recv/send failed. Each event increments one
+operation and one cause, so sum each dimension separately against `io_errors`.
+`last_other_io_errno` records only the most recent unclassified numeric errno and
+must not be summed. `socket_timeouts` (ETIMEDOUT) differ from proxy deadlines.
+Clean FIN and retry outcomes remain uncounted; ECONNRESET/EPIPE stay fatal observed
+socket outcomes. Use a controlled reproduction and workload evidence to decide
+whether these outcomes are expected; the snapshot cannot reconstruct old runs.
+
+`FatalListenerError` exits the process instead of repeatedly resuming an invalid
+or policy-denied listener. Check stderr and listener ownership/OS policy.
+
+Check `/proc/$PID/fd`, `/proc/$PID/status` and OS TCP memory alongside counters.
+Reserved buffer bytes, RSS and kernel socket memory measure different resources.
+Capacity sums across SO_REUSEPORT processes. A staging shortage may occur while
+established relays still have connection capacity; inspect slow hello/connect/prefix
+progress rather than increasing every pool blindly.
+
+For forwarding bugs, run the Linux integration suite, reproduce both FIN orders,
+and compare byte streams at the controlled origin. For CPU or throughput concerns,
+use bench/collect.py plus a controlled harness and optional perf. High generator or
+origin CPU can make a proxy appear saturated when it is not. Keep payload contents
+out of normal diagnostics.

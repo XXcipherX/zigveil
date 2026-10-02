@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!docker-entrypoint.sh
+!build.zig
+!src/
+!src/**
+!examples/
+!examples/zigveil.json

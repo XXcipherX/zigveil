@@ -1,0 +1,15 @@
+{
+  "listen": "0.0.0.0:443",
+  "routes": [
+    { "sni": "example.com", "backend": "203.0.113.10:443" },
+    { "sni": "example.org", "backend": "203.0.113.20:443" },
+    { "sni": "example.net", "backend": "203.0.113.30:443" }
+  ],
+  "max_connections": 1024,
+  "max_handshakes": 64,
+  "relay_buffer_bytes": 16384,
+  "hello_timeout_ms": 5000,
+  "connect_timeout_ms": 5000,
+  "idle_timeout_ms": 300000,
+  "reuse_port": false
+}

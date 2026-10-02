@@ -1,0 +1,111 @@
+name: Linux CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+            zig_arch: x86_64
+            zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            zig_arch: aarch64
+            zig_sha: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Zig 0.16.0 from the official release (verified SHA-256)
+        id: zig
+        shell: bash
+        env:
+          ZIG_ARCH: ${{ matrix.zig_arch }}
+          ZIG_SHA: ${{ matrix.zig_sha }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/0.16.0/zig-${ZIG_ARCH}-linux-0.16.0.tar.xz"
+          echo "$ZIG_SHA  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
+          tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.16.0" >> "$GITHUB_PATH"
+      - name: Check formatting
+        run: zig fmt --check build.zig src
+      - name: Build Debug
+        id: debug
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: zig build
+      - name: Deterministic unit tests
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: zig build test
+      - name: Parser mutations with safety checks
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: zig build fuzz -Doptimize=ReleaseSafe
+      - name: Python syntax and benchmark harness smoke
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          python3 -m py_compile test/*.py bench/*.py
+          python3 bench/harness.py smoke
+      - name: Debug Linux socket integration
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        run: python3 test/integration.py --binary zig-out/bin/zigveil
+      - name: Debug controlled DNS integration
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        run: sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
+      - name: ReleaseFast build and unit tests
+        id: release
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          zig build -Doptimize=ReleaseFast
+          zig build test -Doptimize=ReleaseFast
+      - name: ReleaseFast Linux socket integration
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        run: python3 test/integration.py --binary zig-out/bin/zigveil
+      - name: ReleaseFast controlled DNS integration
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        run: sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
+  docker:
+    name: Docker ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell syntax and lint
+        run: |
+          bash -n deploy/install_docker_compose.sh
+          sh -n docker-entrypoint.sh
+          shellcheck docker-entrypoint.sh deploy/install_docker_compose.sh
+      - uses: docker/setup-buildx-action@v4
+      - name: Build native image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: zigveil:ci
+          cache-from: type=gha,scope=ci-docker-${{ matrix.arch }}
+          cache-to: type=gha,scope=ci-docker-${{ matrix.arch }},mode=max
+      - name: Container smoke tests
+        run: python3 test/docker_smoke.py --image zigveil:ci
+      - name: Compose installer and update E2E
+        if: matrix.arch == 'amd64'
+        run: sudo python3 test/installer_e2e.py --image zigveil:ci

@@ -1,0 +1,80 @@
+# Verification
+
+`zig build test` imports parser, name, config, buffer, pool, timers, connection and
+Linux syscall-boundary tests.
+The artificial socket implementation drives **the production Connection engine**;
+it substitutes recv/send/connect/shutdown operations, not state transitions.
+
+| Contract | Coverage |
+| --- | --- |
+| Complete/partial ClientHello | Every TCP prefix, single-byte deliveries, split record headers/fields |
+| Record fragmentation | Multi-record valid input, split SNI, excessive record count |
+| Input rejection | Record/handshake/vector lengths, duplicate SNI, malformed tail/name, over-limit input |
+| Bounds | Maximum 65536-byte wire prefix and larger hostile input |
+| Routing | Case folding, exact/unknown/missing names, fallback and no fallback on invalid input |
+| Hostname backends | Mandatory port, URLs rejected, startup resolution, IPv4 preference/IPv6-only selection, failure cleanup and resolved self-target validation |
+| Self targets | Exact/wildcard-loopback and mapped aliases in routes/fallback; other ports, remote peers and V6ONLY family independence |
+| Accept errors | Production raw-result decoder: interrupted, empty, per-connection, resource-pressure and fatal outcomes |
+| Preservation | Hello plus coalesced tail, maximum prefix sent through small relay rings |
+| Partial I/O and pressure | Short sends in both directions, full ring suppressing source reads, resume |
+| EOF and FIN | Both half-close orders, drain before FIN/ENOTCONN, opposite buffered data, no repeated shutdown |
+| Failures | Connect/read/write failures, fatal shutdown and ENOTCONN with pending reset on both peers |
+| Error dimensions | Exact errno through production read/write/shutdown/SO_ERROR paths; both socket roles, unknown errno, zero writes, aggregate consistency and no double count |
+| Stats bounds | Maximum-width u64 values produce complete JSON within the fixed 4096-byte buffer |
+| Time | Hello/connect/prefix/idle expiry and disabled established idle |
+| Lifetime | Pool exhaustion, role/generation tokens and stale events after reuse |
+| Timers | Indexed insertion/update/cancellation/reuse against an independent randomized model |
+
+`zig build fuzz -Doptimize=ReleaseSafe` runs seeded random input, structured field
+mutations and maximum-size parser cases. `fuzz.check(bytes)` is a pure test entry
+point suitable for an additional coverage-guided harness. This target is a bounded
+mutation regression campaign; it is not a claim of exhaustive fuzz coverage.
+
+The Python Linux suite starts actual daemon processes and loopback origins. It
+checks raw-prefix preservation, fragmentation, simultaneous bulk streams, slow
+consumers, both FIN orders, unknown/missing/invalid routing, fallback, timeout and
+admission recovery, connect refusal, reset churn, fd reclamation, actual fd-quota
+backoff without spinning through repeated recovery with an established stream,
+self-target config rejection before bind, V6ONLY forwarding to IPv4/mapped backends
+on the listener port, a single OS thread and
+real TLS passthrough through an IPv6 backend. Certificates are generated temporarily
+by OpenSSL. It does not require third-party Python packages.
+
+Controlled client and backend RST tests use zero SO_LINGER after an echoed prefix.
+The daemon is stopped temporarily with SIGSTOP while RST is queued, then resumed:
+the existing EPOLLERR probe deterministically reports ECONNRESET on the correct
+socket side. Each test checks exact operation/cause dimensions and both aggregate
+sums. Both FIN orders and full-duplex bulk additionally require zero I/O errors
+after clean drain. EPIPE is checked through the production engine for both send
+destinations and a real Linux socketpair after local SHUT_WR. A daemon-level EPIPE
+race is not asserted: its existing error probe can consume reset before send.
+
+```sh
+python3 test/integration.py --binary zig-out/bin/zigveil
+```
+
+The CI runs unit and socket tests in Debug and ReleaseFast, parser mutations in
+ReleaseSafe, and a smoke test of the benchmark workload. Timing bounds in integration
+tests allow event-batch delays and runner scheduling; throughput assertions and
+performance numbers are intentionally absent. Production-host soak, real client
+captures and controlled comparative benchmarks remain separate verification work.
+
+`test/dns_integration.py` exercises actual DNS in a disposable root-capable Linux
+environment. A private mount namespace supplies controlled hosts/resolver files
+without modifying the runner's files. The local UDP fixture supplies A/AAAA, many
+answers, IPv6-only, NXDOMAIN and self-target cases. Tests require unchanged routes
+after a DNS answer changes, more hosts results than fit in the fixed queue, exact
+stream bytes, clean FIN and a single serving thread after resolver teardown.
+No external DNS service is required. CI runs this suite in both build modes on
+both architectures. The ordinary integration suite also checks localhost routes
+and fallback.
+
+```sh
+sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
+```
+
+CI additionally builds native amd64/arm64 Docker images and checks the entrypoint,
+read-only configuration, byte preservation, bulk, FIN and container shutdown.
+The installer E2E uses an ephemeral local registry and systemd host to verify first
+install, actual traffic, refusal of insufficient fd capacity without disturbing a
+running service, config preservation and a real container update.

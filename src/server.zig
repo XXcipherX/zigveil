@@ -1,0 +1,291 @@
+const std = @import("std");
+const linux = std.os.linux;
+const net = @import("linux_io.zig");
+const Config = @import("config.zig").Config;
+const Connection = @import("connection.zig").Connection;
+const Pool = @import("pool.zig").Pool;
+const Timers = @import("timers.zig").Timers;
+const Counters = @import("counters.zig").Counters;
+const hello_bytes = @import("client_hello.zig").max_wire_bytes;
+const Slot = struct {
+    conn: Connection = undefined,
+    staging: ?u32 = null,
+    registered: [2]bool = .{ false, false },
+    masks: [2]u32 = .{ 0, 0 },
+    timer_state: ?@import("connection.zig").State = null,
+    timer_prefix: bool = false,
+};
+
+pub const Server = struct {
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    slots: []Slot,
+    pool: Pool,
+    stages: Pool,
+    timers: Timers,
+    relay_slab: []u8,
+    stage_slab: []u8,
+    epoll: i32,
+    listener: i32,
+    signals: i32,
+    previous_mask: linux.sigset_t,
+    counts: Counters = .{},
+    io: net.Io = .{},
+    listener_registered: bool = true,
+    accept_resume_ms: u64 = 0,
+    stop_deadline_ms: ?u64 = null,
+
+    pub fn init(allocator: std.mem.Allocator, config: *const Config) !Server {
+        const raw = config.raw.value;
+        try net.checkFdLimit(raw.max_connections);
+        const slots = try allocator.alloc(Slot, raw.max_connections);
+        errdefer allocator.free(slots);
+        @memset(slots, .{});
+        var pool = try Pool.init(allocator, raw.max_connections);
+        errdefer pool.deinit(allocator);
+        var stages = try Pool.init(allocator, raw.max_handshakes);
+        errdefer stages.deinit(allocator);
+        var timers = try Timers.init(allocator, raw.max_connections);
+        errdefer timers.deinit(allocator);
+        const relay_slab = try allocator.alloc(u8, @as(usize, raw.max_connections) * 2 * raw.relay_buffer_bytes);
+        errdefer allocator.free(relay_slab);
+        const stage_slab = try allocator.alloc(u8, @as(usize, raw.max_handshakes) * hello_bytes);
+        errdefer allocator.free(stage_slab);
+        const epoll_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
+        if (linux.errno(epoll_rc) != .SUCCESS) return error.EpollCreateFailed;
+        const epoll: i32 = @intCast(epoll_rc);
+        errdefer net.close(epoll);
+        var mask = linux.sigemptyset();
+        linux.sigaddset(&mask, .INT);
+        linux.sigaddset(&mask, .TERM);
+        linux.sigaddset(&mask, .USR1);
+        var previous_mask: linux.sigset_t = undefined;
+        if (linux.errno(linux.sigprocmask(linux.SIG.BLOCK, &mask, &previous_mask)) != .SUCCESS) return error.SignalMaskFailed;
+        errdefer _ = linux.sigprocmask(linux.SIG.SETMASK, &previous_mask, null);
+        const signal_rc = linux.signalfd(-1, &mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
+        if (linux.errno(signal_rc) != .SUCCESS) return error.SignalFdFailed;
+        const signals: i32 = @intCast(signal_rc);
+        errdefer net.close(signals);
+        const listener = try net.listen(config.listen, raw.reuse_port);
+        errdefer net.close(listener);
+        try control(epoll, linux.EPOLL.CTL_ADD, listener, linux.EPOLL.IN, 0);
+        try control(epoll, linux.EPOLL.CTL_ADD, signals, linux.EPOLL.IN, 1);
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .slots = slots,
+            .pool = pool,
+            .stages = stages,
+            .timers = timers,
+            .relay_slab = relay_slab,
+            .stage_slab = stage_slab,
+            .epoll = epoll,
+            .listener = listener,
+            .signals = signals,
+            .previous_mask = previous_mask,
+        };
+    }
+
+    pub fn deinit(self: *Server) void {
+        for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
+        net.close(self.listener);
+        net.close(self.signals);
+        net.close(self.epoll);
+        _ = linux.sigprocmask(linux.SIG.SETMASK, &self.previous_mask, null);
+        self.pool.deinit(self.allocator);
+        self.stages.deinit(self.allocator);
+        self.timers.deinit(self.allocator);
+        self.allocator.free(self.slots);
+        self.allocator.free(self.relay_slab);
+        self.allocator.free(self.stage_slab);
+    }
+
+    pub fn run(self: *Server) !void {
+        net.print("zigveil: listening on {s}; slots={d} staging={d} buffers={d} bytes\n", .{
+            self.config.raw.value.listen, self.slots.len, self.stages.entries.len, Config.bufferBytes(self.config.raw.value),
+        });
+        var events: [256]linux.epoll_event = undefined;
+        var now = try net.nowMs();
+        var stats = now + self.config.raw.value.stats_interval_ms;
+        while (true) {
+            if (self.stop_deadline_ms) |deadline| {
+                if (self.counts.active == 0 or now >= deadline) break;
+            }
+            var wake = now +| 250;
+            if (self.timers.first()) |timer| wake = @min(wake, timer.when);
+            if (self.stop_deadline_ms) |deadline| wake = @min(wake, deadline);
+            if (!self.listener_registered and self.stop_deadline_ms == null) wake = @min(wake, self.accept_resume_ms);
+            if (self.config.raw.value.stats_interval_ms != 0) wake = @min(wake, stats);
+            const timeout: i32 = @intCast(wake -| now);
+            const rc = linux.epoll_wait(self.epoll, &events, events.len, timeout);
+            if (linux.errno(rc) == .INTR) continue;
+            if (linux.errno(rc) != .SUCCESS) return error.EpollWaitFailed;
+            now = try net.nowMs();
+            for (events[0..rc]) |event| {
+                const token = event.data.u64;
+                if (token == 0) {
+                    if (self.listener_registered and self.stop_deadline_ms == null) try self.admit(now);
+                    continue;
+                }
+                if (token == 1) {
+                    try self.signal(now);
+                    continue;
+                }
+                const index = self.pool.resolve(token) orelse continue;
+                const conn = &self.slots[index].conn;
+                const backend = token & 1 != 0;
+                if (event.events & linux.EPOLL.ERR != 0 and conn.state != .connecting) {
+                    conn.checkSocketError(&self.io, backend, &self.counts);
+                }
+                conn.drive(&self.io, self.config, now, backend, &self.counts);
+                try self.reconcile(index);
+            }
+            // Only due heap entries are visited. Activity can postpone an idle
+            // deadline without touching the heap on every successful recv/send.
+            now = try net.nowMs();
+            for (0..256) |_| {
+                const timer = self.timers.first() orelse break;
+                if (timer.when > now) break;
+                const conn = &self.slots[timer.slot].conn;
+                conn.expire(self.config.raw.value, now, &self.counts);
+                if (conn.state == .closed) self.drop(timer.slot) else self.timers.set(timer.slot, conn.deadline(self.config.raw.value));
+            }
+            if (!self.listener_registered and self.stop_deadline_ms == null and now >= self.accept_resume_ms) {
+                try control(self.epoll, linux.EPOLL.CTL_ADD, self.listener, linux.EPOLL.IN, 0);
+                self.listener_registered = true;
+            }
+            if (self.config.raw.value.stats_interval_ms != 0 and now >= stats) {
+                self.snapshot();
+                stats = now + self.config.raw.value.stats_interval_ms;
+            }
+        }
+        for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
+        self.snapshot();
+    }
+
+    fn admit(self: *Server, now: u64) !void {
+        for (0..64) |_| {
+            const fd = net.accept(self.listener) catch |err| {
+                if (err == error.WouldBlock) return;
+                if (err == error.Interrupted) continue;
+                self.counts.accept_errors +%= 1;
+                if (err == error.TransientConnectionError) continue;
+                if (err != error.ResourcePressure) return err;
+                try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0);
+                self.listener_registered = false;
+                self.accept_resume_ms = now + 250;
+                return;
+            };
+            self.counts.accepted +%= 1;
+            if (self.pool.free == null or self.stages.free == null) {
+                self.counts.rejected +%= 1;
+                net.close(fd);
+                continue;
+            }
+            net.option(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1) catch {
+                self.counts.rejected +%= 1;
+                net.close(fd);
+                continue;
+            };
+            const index = self.pool.acquire().?;
+            const staging = self.stages.acquire().?;
+            const bytes = self.config.raw.value.relay_buffer_bytes;
+            const start = @as(usize, index) * 2 * bytes;
+            self.slots[index] = .{
+                .conn = Connection.init(fd, self.stage_slab[@as(usize, staging) * hello_bytes ..][0..hello_bytes], self.relay_slab[start..][0..bytes], self.relay_slab[start + bytes ..][0..bytes], now),
+                .staging = staging,
+            };
+            self.counts.active += 1;
+            // Start immediately; already-arrived hello bytes need no extra turn.
+            self.slots[index].conn.drive(&self.io, self.config, now, false, &self.counts);
+            try self.reconcile(index);
+        }
+    }
+
+    fn reconcile(self: *Server, index: u32) !void {
+        const slot = &self.slots[index];
+        if (slot.conn.state == .closed) {
+            self.drop(index);
+            return;
+        }
+        if (slot.conn.stage == null) if (slot.staging) |staging| {
+            self.stages.release(staging);
+            slot.staging = null;
+        };
+        const prefix = slot.conn.stage != null;
+        if (slot.timer_state == null or slot.timer_state.? != slot.conn.state or slot.timer_prefix != prefix) {
+            self.timers.set(index, slot.conn.deadline(self.config.raw.value));
+            slot.timer_state = slot.conn.state;
+            slot.timer_prefix = prefix;
+        }
+        for (0..2) |role| {
+            const backend = role == 1;
+            const fd = if (backend) slot.conn.backend else slot.conn.client;
+            if (fd < 0) continue;
+            const interest = slot.conn.interest(backend);
+            var mask: u32 = 0;
+            if (interest.read) mask |= linux.EPOLL.IN | linux.EPOLL.RDHUP;
+            if (interest.write) mask |= linux.EPOLL.OUT;
+            if (mask == 0) {
+                if (slot.registered[role]) {
+                    try control(self.epoll, linux.EPOLL.CTL_DEL, fd, 0, 0);
+                    slot.registered[role] = false;
+                }
+            } else if (!slot.registered[role] or slot.masks[role] != mask) {
+                try control(self.epoll, if (slot.registered[role]) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD, fd, mask, self.pool.token(index, backend));
+                slot.registered[role] = true;
+            }
+            slot.masks[role] = mask;
+        }
+    }
+
+    fn drop(self: *Server, index: u32) void {
+        const slot = &self.slots[index];
+        self.timers.set(index, null);
+        // DEL before close, and generation validation before every batch event.
+        for (0..2) |role| if (slot.registered[role]) {
+            _ = linux.epoll_ctl(self.epoll, linux.EPOLL.CTL_DEL, if (role == 1) slot.conn.backend else slot.conn.client, null);
+        };
+        net.close(slot.conn.client);
+        net.close(slot.conn.backend);
+        if (slot.staging) |staging| self.stages.release(staging);
+        self.pool.release(index);
+        self.counts.active -= 1;
+        self.counts.closed +%= 1;
+    }
+
+    fn signal(self: *Server, now: u64) !void {
+        for (0..32) |_| {
+            var info: linux.signalfd_siginfo = undefined;
+            const bytes = std.mem.asBytes(&info);
+            const rc = linux.read(self.signals, bytes.ptr, bytes.len);
+            switch (linux.errno(rc)) {
+                .AGAIN => return,
+                .INTR => continue,
+                .SUCCESS => if (rc != bytes.len) return error.SignalReadFailed,
+                else => return error.SignalReadFailed,
+            }
+            if (info.signo == @intFromEnum(linux.SIG.USR1)) {
+                self.snapshot();
+            } else if (self.stop_deadline_ms != null) {
+                self.stop_deadline_ms = now;
+            } else {
+                self.stop_deadline_ms = now + 30000;
+                if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0);
+                self.listener_registered = false;
+                net.close(self.listener);
+                self.listener = -1;
+            }
+        }
+    }
+
+    fn snapshot(self: *const Server) void {
+        var bytes: [@import("counters.zig").snapshot_capacity]u8 = undefined;
+        net.print("{s}", .{self.counts.snapshot(&bytes)});
+    }
+};
+
+fn control(epoll: i32, operation: u32, fd: i32, mask: u32, token: u64) !void {
+    var event: linux.epoll_event = .{ .events = mask, .data = .{ .u64 = token } };
+    if (linux.errno(linux.epoll_ctl(epoll, operation, fd, if (operation == linux.EPOLL.CTL_DEL) null else &event)) != .SUCCESS) return error.EpollControlFailed;
+}

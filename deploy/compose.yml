@@ -1,0 +1,27 @@
+services:
+  zigveil:
+    image: ${ZIGVEIL_IMAGE:-ghcr.io/xxcipherx/zigveil:latest}
+    container_name: zigveil
+    restart: unless-stopped
+    stop_grace_period: 35s
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      nofile:
+        soft: ${ZIGVEIL_NOFILE:-65536}
+        hard: ${ZIGVEIL_NOFILE:-65536}
+    volumes:
+      - type: bind
+        source: ./config.json
+        target: /etc/zigveil/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

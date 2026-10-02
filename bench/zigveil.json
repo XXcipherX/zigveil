@@ -1,0 +1,8 @@
+{
+  "listen": "127.0.0.1:8443",
+  "routes": [{ "sni": "example.com", "backend": "127.0.0.1:9443" }],
+  "max_connections": 2048,
+  "max_handshakes": 64,
+  "idle_timeout_ms": 0,
+  "stats_interval_ms": 0
+}
