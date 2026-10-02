@@ -1,0 +1,66 @@
+name: Benchmarks
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Seconds per workload (1..60)
+        required: true
+        default: '10'
+        type: string
+      repeats:
+        description: Repetitions per workload (1..5)
+        required: true
+        default: '3'
+        type: string
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    name: Benchmark ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+            zig_arch: x86_64
+            zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            zig_arch: aarch64
+            zig_sha: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Zig 0.16.0 from the official release (verified SHA-256)
+        shell: bash
+        env:
+          ZIG_ARCH: ${{ matrix.zig_arch }}
+          ZIG_SHA: ${{ matrix.zig_sha }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/zig.tar.xz" \
+            "https://ziglang.org/download/0.16.0/zig-${ZIG_ARCH}-linux-0.16.0.tar.xz"
+          echo "$ZIG_SHA  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
+          tar -xf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.16.0" >> "$GITHUB_PATH"
+      - name: Build ReleaseFast
+        run: zig build -Doptimize=ReleaseFast
+      - name: Measure bulk, latency and churn with direct-origin controls
+        env:
+          BENCH_BUILD_MODE: ReleaseFast
+          BENCH_DURATION: ${{ inputs.duration }}
+          BENCH_REPEATS: ${{ inputs.repeats }}
+        run: |
+          python3 bench/ci.py --binary zig-out/bin/zigveil \
+            --duration "$BENCH_DURATION" --repeats "$BENCH_REPEATS" \
+            --output "$RUNNER_TEMP/zigveil-benchmarks"
+      - name: Upload raw results, configuration and environment
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmarks-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/zigveil-benchmarks/
+          if-no-files-found: warn
+          retention-days: 30

@@ -75,6 +75,11 @@ jobs:
       - name: ReleaseFast controlled DNS integration
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         run: sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
+      - name: Benchmark flow control, timeout and 1000-stream regressions
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        run: |
+          ulimit -n 8192
+          timeout 120s python3 test/bench_harness.py --binary zig-out/bin/zigveil
   docker:
     name: Docker ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}

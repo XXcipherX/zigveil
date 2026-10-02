@@ -61,7 +61,19 @@ python3 test/integration.py --binary zig-out/bin/zigveil
 ```
 
 The CI runs unit and socket tests in Debug and ReleaseFast, parser mutations in
-ReleaseSafe, and a smoke test of the benchmark workload. Timing bounds in integration
+ReleaseSafe, a smoke test of the benchmark workload, and focused harness regressions.
+`test/bench_harness.py` checks bounded unreturned echo credit, delayed drain, failed
+measurement JSON and exit status, cancellation/close cleanup, and 1000 real streams
+through ReleaseFast Zigveil with clean byte counts, FIN and I/O counters:
+
+```sh
+ulimit -n 8192
+python3 test/bench_harness.py --binary zig-out/bin/zigveil
+```
+
+The manually dispatched Benchmarks workflow records actual workloads and direct
+controls; see [the benchmark guide](../bench/README.md#github-actions).
+Timing bounds in integration
 tests allow event-batch delays and runner scheduling; throughput assertions and
 performance numbers are intentionally absent. Production-host soak, real client
 captures and controlled comparative benchmarks remain separate verification work.

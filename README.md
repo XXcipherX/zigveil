@@ -60,6 +60,10 @@ and arm64 runners. It also builds and exercises both Docker images and verifies
 the Compose installer/update flow. Zig is fetched from its official release with
 a pinned SHA-256 checksum.
 
+The manual **Benchmarks** workflow measures bulk, latency and connection churn
+with direct-origin controls on native amd64/arm64 runners. Results and environment
+metadata are saved as artifacts; see the [benchmark guide](bench/README.md#github-actions).
+
 ## Configure and run
 
 ```json

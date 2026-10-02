@@ -25,6 +25,8 @@ zig build -Doptimize=ReleaseFast
 zig build test -Doptimize=ReleaseFast
 python3 test/integration.py --binary zig-out/bin/zigveil
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
+ulimit -n 8192
+python3 test/bench_harness.py --binary zig-out/bin/zigveil
 ```
 
 Docker/deployment changes additionally require shell syntax/lint, native image
@@ -42,4 +44,7 @@ Keep daemon readiness independent of log verbosity.
    and any limits; absence of execution is not a passing test result.
 
 Performance changes additionally follow the benchmark guide. Measure Zigveil
-directly under reproducible workloads before making throughput claims.
+directly under reproducible workloads before making throughput claims. The manual
+Benchmarks workflow records hosted-runner measurements and direct-origin controls;
+inspect all repetitions and artifacts, and retain failures. Harness changes must
+preserve bounded echo credit, failed-run JSON/nonzero status and cancellation cleanup.

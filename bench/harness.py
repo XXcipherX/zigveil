@@ -2,6 +2,7 @@
 """Dependency-free opaque TCP echo workloads for Zigveil."""
 import argparse
 import asyncio
+from dataclasses import dataclass, field
 import json
 import math
 import platform
@@ -10,6 +11,30 @@ import statistics
 import struct
 import sys
 import time
+
+
+@dataclass
+class Progress:
+    tx: int = 0
+    rx: int = 0
+    connections: int = 0
+    round_trips: int = 0
+    samples: list = field(default_factory=list)
+    max_inflight: int = 0
+
+
+async def close_writer(writer, *, abort=False, timeout=1):
+    if abort:
+        writer.transport.abort()
+        return
+    writer.close()
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout)
+    except (TimeoutError, OSError):
+        writer.transport.abort()
+    except BaseException:
+        writer.transport.abort()
+        raise
 
 
 def client_hello(name):
@@ -24,6 +49,7 @@ def client_hello(name):
 
 
 async def echo(reader, writer):
+    failed = False
     try:
         while chunk := await reader.read(65536):
             writer.write(chunk)
@@ -32,13 +58,9 @@ async def echo(reader, writer):
             writer.write_eof()
             await writer.drain()
     except (ConnectionError, asyncio.CancelledError):
-        pass
+        failed = True
     finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except ConnectionError:
-            pass
+        await close_writer(writer, abort=failed)
 
 
 async def connect(args):
@@ -51,131 +73,159 @@ async def connect(args):
             raise ValueError("ClientHello wire image changed")
         return reader, writer
     except BaseException:
-        writer.close()
-        await writer.wait_closed()
+        await close_writer(writer, abort=True)
         raise
 
 
-async def bulk(pair, args, deadline):
+async def bulk(pair, args, deadline, progress):
     reader, writer = pair
     chunk = bytes(range(256)) * (args.chunk_bytes // 256)
-    tx = 0
+    credit = asyncio.Event()
+    # Wake a sender waiting for echo credit when its sending window ends, even
+    # if the peer stops replying. This timer is per stream, not per packet.
+    wakeup = asyncio.get_running_loop().call_later(max(0, deadline - time.monotonic()), credit.set)
 
     async def send():
-        nonlocal tx
         while time.monotonic() < deadline:
+            if progress.tx - progress.rx + len(chunk) > args.inflight_bytes:
+                credit.clear()
+                await credit.wait()
+                continue
             writer.write(chunk)
+            # Account before drain yields: the reader can already observe the
+            # echo while drain is waiting. Only fully drained runs have rates.
+            progress.tx += len(chunk)
+            progress.max_inflight = max(progress.max_inflight, progress.tx - progress.rx)
             await writer.drain()
-            tx += len(chunk)
         writer.write_eof()
         await writer.drain()
 
     sender = asyncio.create_task(send())
-    rx = 0
     try:
         while data := await reader.read(65536):
-            rx += len(data)
+            progress.rx += len(data)
+            if progress.rx > progress.tx:
+                raise ValueError("received more echo bytes than sent")
+            credit.set()
+        if not sender.done():
+            # EOF cannot be caused by our FIN before write_eof has been issued.
+            if time.monotonic() < deadline:
+                raise ValueError("echo EOF before the sending window ended")
         await sender
-        if rx != tx:
-            raise ValueError(f"lost bytes: sent={tx}, received={rx}")
-        return {"tx": tx, "rx": rx, "connections": 1, "samples": [], "round_trips": 0}
+        if progress.rx != progress.tx:
+            raise ValueError(f"lost bytes: sent={progress.tx}, received={progress.rx}")
+        progress.connections = 1
     finally:
+        wakeup.cancel()
         if not sender.done():
             sender.cancel()
         await asyncio.gather(sender, return_exceptions=True)
-        writer.close()
-        await writer.wait_closed()
 
 
-async def latency(pair, args, deadline, index):
+async def latency(pair, args, deadline, index, progress):
     reader, writer = pair
-    samples = []
+    samples = progress.samples
     sample_cap = max(1, 1_000_000 // args.concurrency)
     rng = random.Random(index)
     count = 0
     payload = bytes(range(64))
-    try:
-        while time.monotonic() < deadline:
-            start = time.perf_counter_ns()
-            writer.write(payload)
-            await writer.drain()
-            echoed = await reader.readexactly(len(payload))
-            elapsed = (time.perf_counter_ns() - start) / 1000
-            if echoed != payload:
-                raise ValueError("echo corruption")
-            count += 1
-            if len(samples) < sample_cap:
-                samples.append(elapsed)
-            else:
-                slot = rng.randrange(count)
-                if slot < sample_cap:
-                    samples[slot] = elapsed
-        return {"tx": count * 64, "rx": count * 64, "connections": 1,
-                "samples": samples, "round_trips": count}
-    finally:
-        writer.close()
-        await writer.wait_closed()
+    while time.monotonic() < deadline:
+        start = time.perf_counter_ns()
+        writer.write(payload)
+        progress.tx += len(payload)
+        await writer.drain()
+        echoed = await reader.readexactly(len(payload))
+        progress.rx += len(echoed)
+        elapsed = (time.perf_counter_ns() - start) / 1000
+        if echoed != payload:
+            raise ValueError("echo corruption")
+        count += 1
+        progress.round_trips = count
+        if len(samples) < sample_cap:
+            samples.append(elapsed)
+        else:
+            slot = rng.randrange(count)
+            if slot < sample_cap:
+                samples[slot] = elapsed
+    progress.connections = 1
 
 
-async def churn(args, deadline):
-    count = 0
+async def churn(args, deadline, progress):
     while time.monotonic() < deadline:
         _, writer = await connect(args)
-        writer.close()
-        await writer.wait_closed()
-        count += 1
-    return {"tx": 0, "rx": 0, "connections": count, "samples": [], "round_trips": count}
+        await close_writer(writer)
+        progress.connections += 1
+        progress.round_trips += 1
 
 
 async def run(args):
     pairs = []
-    if args.mode != "churn":
-        semaphore = asyncio.Semaphore(16)
-        async def prepare():
-            async with semaphore:
-                return await connect(args)
-        prepared = await asyncio.gather(*(prepare() for _ in range(args.concurrency)), return_exceptions=True)
-        errors = [repr(x) for x in prepared if isinstance(x, BaseException)]
-        pairs = [x for x in prepared if not isinstance(x, BaseException)]
-        if errors:
-            for _, writer in pairs:
-                writer.close()
-                await writer.wait_closed()
-            return {"errors": errors, "setup_failed": True}
-    start = time.monotonic()
-    deadline = start + args.duration
-    if args.mode == "bulk":
-        tasks = [bulk(pair, args, deadline) for pair in pairs]
-    elif args.mode == "latency":
-        tasks = [latency(pair, args, deadline, index) for index, pair in enumerate(pairs)]
-    else:
-        tasks = [churn(args, deadline) for _ in range(args.concurrency)]
+    tasks = []
+    clean = False
     try:
-        outcomes = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), args.duration + 15)
+        if args.mode != "churn":
+            semaphore = asyncio.Semaphore(16)
+            async def prepare():
+                async with semaphore:
+                    pair = await connect(args)
+                    # Retain ownership immediately, including during cancellation
+                    # of a later setup task before gather has returned.
+                    pairs.append(pair)
+            prepared = await asyncio.gather(*(prepare() for _ in range(args.concurrency)), return_exceptions=True)
+            errors = [repr(x) for x in prepared if isinstance(x, BaseException)]
+            if errors:
+                return {"mode": args.mode, "concurrency": args.concurrency,
+                        "valid": False, "setup_failed": True, "error_count": len(errors),
+                        "errors": list(dict.fromkeys(errors))[:16]}
+        progress = [Progress() for _ in range(args.concurrency)]
+        start = time.monotonic()
+        deadline = start + args.duration
+        if args.mode == "bulk":
+            workers = [bulk(pair, args, deadline, state) for pair, state in zip(pairs, progress)]
+        elif args.mode == "latency":
+            workers = [latency(pair, args, deadline, index, state)
+                       for index, (pair, state) in enumerate(zip(pairs, progress))]
+        else:
+            workers = [churn(args, deadline, state) for state in progress]
+        tasks = [asyncio.create_task(worker) for worker in workers]
+        _, pending = await asyncio.wait(tasks, timeout=args.duration + args.drain_timeout)
+        for task in pending:
+            task.cancel()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        seconds = time.monotonic() - start
+        failures = [outcome for task, outcome in zip(tasks, outcomes)
+                    if task not in pending and isinstance(outcome, BaseException)]
+        errors = list(dict.fromkeys(repr(x) for x in failures))[:16]
+        if pending:
+            errors.insert(0, f"run timed out after {args.duration + args.drain_timeout:g}s; "
+                          f"{len(pending)} workers did not finish payload/EOF drain")
+        clean = not errors
+        tx = sum(x.tx for x in progress)
+        rx = sum(x.rx for x in progress)
+        connections = sum(x.connections for x in progress)
+        samples = sorted(value for state in progress for value in state.samples)
+        return {"mode": args.mode, "concurrency": args.concurrency, "seconds": seconds,
+                "duration_requested_s": args.duration, "drain_seconds": max(0, seconds - args.duration),
+                "drain_timeout_s": args.drain_timeout, "valid": clean, "timed_out": bool(pending),
+                "inflight_bytes_per_stream": args.inflight_bytes if args.mode == "bulk" else None,
+                "max_observed_inflight_bytes_per_stream": max(x.max_inflight for x in progress) if args.mode == "bulk" else None,
+                "bytes_client_to_backend": tx, "bytes_backend_to_client": rx,
+                "aggregate_forwarded_gbit_s": (tx + rx) * 8 / seconds / 1e9 if clean else None,
+                "echo_goodput_gbit_s": rx * 8 / seconds / 1e9 if clean else None,
+                "connections": connections,
+                "connections_per_second": connections / seconds if clean and args.mode == "churn" else None,
+                "round_trips": sum(x.round_trips for x in progress),
+                "latency_us_p50": statistics.median(samples) if clean and samples else None,
+                "latency_us_p99": samples[max(0, math.ceil(len(samples) * .99) - 1)] if clean and samples else None,
+                "latency_sample_count": len(samples), "errors": errors,
+                "error_count": len(failures) + len(pending), "unfinished_workers": len(pending),
+                "kernel": platform.release(), "python": platform.python_version()}
     finally:
-        for _, writer in pairs:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except ConnectionError:
-                pass
-    seconds = time.monotonic() - start
-    errors = [repr(x) for x in outcomes if isinstance(x, BaseException)]
-    good = [x for x in outcomes if not isinstance(x, BaseException)]
-    tx = sum(x["tx"] for x in good)
-    rx = sum(x["rx"] for x in good)
-    connections = sum(x["connections"] for x in good)
-    samples = sorted(value for result in good for value in result["samples"])
-    return {"mode": args.mode, "concurrency": args.concurrency, "seconds": seconds,
-            "bytes_client_to_backend": tx, "bytes_backend_to_client": rx,
-            "aggregate_forwarded_gbit_s": (tx + rx) * 8 / seconds / 1e9,
-            "echo_goodput_gbit_s": rx * 8 / seconds / 1e9,
-            "connections": connections, "connections_per_second": connections / seconds if args.mode == "churn" else None,
-            "round_trips": sum(x["round_trips"] for x in good),
-            "latency_us_p50": statistics.median(samples) if samples else None,
-            "latency_us_p99": samples[max(0, math.ceil(len(samples) * .99) - 1)] if samples else None,
-            "latency_sample_count": len(samples), "errors": errors,
-            "kernel": platform.release(), "python": platform.python_version()}
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(close_writer(writer, abort=not clean) for _, writer in pairs))
 
 
 async def smoke():
@@ -183,7 +233,8 @@ async def smoke():
     async with server:
         for mode in ("bulk", "latency", "churn"):
             args = argparse.Namespace(host="127.0.0.1", port=server.sockets[0].getsockname()[1],
-                                      sni="example.com", mode=mode, duration=.1, concurrency=2, chunk_bytes=4096)
+                                      sni="example.com", mode=mode, duration=.1, concurrency=2, chunk_bytes=4096,
+                                      inflight_bytes=16384, drain_timeout=2)
             result = await run(args)
             assert not result["errors"], result
             assert result["connections"] > 0, result
@@ -214,14 +265,22 @@ def main():
     runner.add_argument("--duration", type=float, default=30)
     runner.add_argument("--concurrency", type=int, default=1)
     runner.add_argument("--chunk-bytes", type=int, default=65536)
+    runner.add_argument("--inflight-bytes", type=int, default=262144,
+                        help="maximum unreturned bulk payload bytes per stream (default: 256 KiB)")
+    runner.add_argument("--drain-timeout", type=float, default=15,
+                        help="extra seconds allowed after the sending window (default: 15)")
     args = parser.parse_args()
     if args.command == "serve":
         asyncio.run(serve(args))
     elif args.command == "smoke":
         asyncio.run(smoke())
     else:
-        if args.duration <= 0 or not 1 <= args.concurrency <= 10000 or not 256 <= args.chunk_bytes <= 1048576 or args.chunk_bytes % 256:
+        if not math.isfinite(args.duration) or args.duration <= 0 or not 1 <= args.concurrency <= 10000 or not 256 <= args.chunk_bytes <= 1048576 or args.chunk_bytes % 256:
             parser.error("duration > 0, concurrency 1..10000, chunk-bytes 256..1048576 (multiple of 256)")
+        if not math.isfinite(args.drain_timeout) or args.drain_timeout <= 0:
+            parser.error("drain-timeout must be finite and > 0")
+        if not 256 <= args.inflight_bytes <= 67108864 or (args.mode == "bulk" and args.inflight_bytes < args.chunk_bytes):
+            parser.error("inflight-bytes must be 256..67108864 and at least chunk-bytes in bulk mode")
         result = asyncio.run(run(args))
         print(json.dumps(result, sort_keys=True))
         return int(bool(result["errors"]))
@@ -232,4 +291,4 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        pass
+        sys.exit(130)
