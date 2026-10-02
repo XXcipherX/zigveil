@@ -62,7 +62,7 @@ a pinned SHA-256 checksum.
 
 The manual **Benchmarks** workflow measures bulk, latency and connection churn
 with direct-origin controls on native amd64/arm64 runners. Results and environment
-metadata are saved as artifacts; see the [benchmark guide](bench/README.md#github-actions).
+metadata are saved as artifacts; see the [benchmark guide](bench/README.md#paired-measurements).
 
 ## Configure and run
 
@@ -122,7 +122,7 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `fallback` | `null` | Backend for a valid hello with unknown or absent SNI |
 | `max_connections` | `1024` | Total slots per process; range 1..65536 |
 | `max_handshakes` | `64` | Staging slots; range 1..max_connections |
-| `relay_buffer_bytes` | `16384` | Per direction; powers of two from 4096..65536 |
+| `relay_buffer_bytes` | `65536` | Per direction; powers of two from 4096..65536 |
 | `hello_timeout_ms` | `5000` | Absolute pre-routing deadline; range 250..60000 |
 | `connect_timeout_ms` | `5000` | Separate absolute connect and prefix-send deadlines |
 | `idle_timeout_ms` | `300000` | Successful-I/O idle deadline; `0` disables it |
@@ -209,7 +209,16 @@ The readiness handler performs consecutive nonblocking reads and writes until
 EAGAIN, a full ring, EOF or its fairness limit. Each direction gets up to 128
 socket operations and 256 KiB of sent data per dispatch. Write readiness is watched
 only for queued bytes. A full destination ring suspends the corresponding source
-read interest, letting TCP apply backpressure.
+read interest, letting TCP apply backpressure. Empty rings reset their head so the
+next read can use one contiguous span.
+
+After a large opaque read, the relay can use nonblocking `splice` through two
+pipes shared by the serving process. Each callback returns the pipes empty:
+blocked or partial output is saved in that connection's bounded ring. The
+original prefix stays ordered, and connections never share pending bytes.
+Repeated short messages return to buffered forwarding. Pipe allocation failure
+also keeps the buffered path usable. Build with `-Drelay_splice=false` to disable
+this path for a controlled comparison.
 
 EOF stops only that read half. Its remaining prefix/ring bytes are sent before
 `shutdown(SHUT_WR)` forwards FIN; the reverse half remains usable. Both finished
@@ -226,16 +235,19 @@ max_connections × 2 × relay_buffer_bytes
   + max_handshakes × 65536
 ```
 
-Defaults reserve **36 MiB of buffer address space**: 32 MiB of relay rings and
+Defaults reserve **132 MiB of buffer address space**: 128 MiB of relay rings and
 4 MiB of staging, plus slot/config metadata. Pages are touched on use, so reservation
 is not an RSS prediction. Kernel socket buffers and epoll storage are additional.
 Buffer reservation above 1 GiB is rejected. A staging slot is returned after the
 entire received prefix has been sent, or on teardown; established relays retain
 only their two rings. Even with idle expiry disabled, prefix send remains bounded.
+The shared pipes add at most twice the configured ring capacity in kernel pipe
+storage and four descriptors per process. Startup requires a descriptor limit of
+at least `2 × max_connections + 12` (`+ 8` with splice disabled).
 
-The 16 KiB default is a starting tradeoff between chunk size and connection density,
-not a measured optimum. A 64 KiB pair would quadruple relay reservation. The
-[benchmark guide](bench/README.md) explains how to compare buffer sizes.
+The 64 KiB default favors sustained throughput. Smaller rings reduce memory
+reservation and transfer sizes. The [benchmark guide](bench/README.md) explains
+how to compare sizes and account for CPU, latency and memory together.
 
 One process is the default. When measurements justify more cores, launch independent
 processes with `reuse_port: true` and identical route tables, optionally pinning each

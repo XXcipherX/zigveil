@@ -80,6 +80,38 @@ jobs:
         run: |
           ulimit -n 8192
           timeout 120s python3 test/bench_harness.py --binary zig-out/bin/zigveil
+      - name: Compile-time diagnostics and laboratory regressions
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          zig build test -Ddataplane_metrics=true
+          zig build test -Doptimize=ReleaseFast -Ddataplane_metrics=true
+          cp zig-out/bin/zigveil "$RUNNER_TEMP/zigveil-normal"
+          zig build -Doptimize=ReleaseFast -Ddataplane_metrics=true -Dbench_tools=true
+          python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
+          ulimit -n 32768
+          timeout 120s python3 test/bench_harness.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
+          python3 test/bench_lab.py --binary zig-out/bin/zigveil --normal-binary "$RUNNER_TEMP/zigveil-normal" --native-binary zig-out/bin/zigveil-bench
+      - name: Buffered build control
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          ulimit -n 32768
+          zig build test -Drelay_splice=false
+          zig build test -Doptimize=ReleaseFast -Drelay_splice=false -Ddataplane_metrics=true
+          zig build -Doptimize=ReleaseFast -Drelay_splice=false -Ddataplane_metrics=true -Dbench_tools=true
+          python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
+          python3 test/bench_lab.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
+      - name: Shared splice ownership and spill correctness
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          ulimit -n 32768
+          zig build test -Drelay_splice=true
+          zig build test -Doptimize=ReleaseFast -Drelay_splice=true -Ddataplane_metrics=true
+          zig build -Doptimize=ReleaseFast -Drelay_splice=true -Ddataplane_metrics=true -Dbench_tools=true
+          python3 test/integration.py --binary zig-out/bin/zigveil --splice --diagnostics
+          python3 bench/ci.py --binary zig-out/bin/zigveil --metrics-binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench \
+            --duration 1 --repeats 1 --workloads bulk:1000,loaded-latency:10,churn:1 --rings 65536 --profiling basic \
+            --options '{"variants":["metrics"],"relay_splice":true,"generator_workers":2,"origin_io":"splice","warmup":0.05}' \
+            --output "$RUNNER_TEMP/shared-splice-checks"
   docker:
     name: Docker ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}

@@ -8,17 +8,65 @@ import time
 from pathlib import Path
 
 
+def cpu_topology(cpus):
+    topology = {}
+    for cpu in cpus:
+        values = {}
+        for name in ("physical_package_id", "core_id", "thread_siblings_list"):
+            try:
+                values[name] = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/{name}").read_text().strip()
+            except OSError:
+                values[name] = None
+        topology[str(cpu)] = values
+    return topology
+
+
 def snapshot(pid):
     root = Path(f"/proc/{pid}")
     stat = (root / "stat").read_text()
     fields = stat[stat.rfind(")") + 2:].split()
     status = dict(line.split(":", 1) for line in (root / "status").read_text().splitlines())
-    return {"user_ticks": int(fields[11]), "system_ticks": int(fields[12]),
+    sched = {}
+    try:
+        sched = dict(line.split(":", 1) for line in (root / "sched").read_text().splitlines() if ":" in line)
+        sched = {k.strip(): v.strip() for k, v in sched.items()}
+    except OSError:
+        pass
+    try:
+        runtime_ns, runqueue_ns, timeslices = map(int, (root / "schedstat").read_text().split()[:3])
+    except OSError:
+        runtime_ns = runqueue_ns = timeslices = None
+    return {"sample_ns": time.monotonic_ns(), "user_ticks": int(fields[11]), "system_ticks": int(fields[12]),
+            "minor_faults": int(fields[7]), "major_faults": int(fields[9]),
+            "runtime_ns": runtime_ns, "runqueue_ns": runqueue_ns, "timeslices": timeslices,
+            "cpu_migrations": int(sched["se.nr_migrations"]) if "se.nr_migrations" in sched else None,
             "rss_bytes": int(status["VmRSS"].split()[0]) * 1024,
+            "hwm_rss_bytes": int(status["VmHWM"].split()[0]) * 1024,
             "virtual_bytes": int(status["VmSize"].split()[0]) * 1024,
             "voluntary_switches": int(status["voluntary_ctxt_switches"]),
             "involuntary_switches": int(status["nonvoluntary_ctxt_switches"]),
             "threads": int(status["Threads"]), "fds": len(list((root / "fd").iterdir()))}
+
+
+def difference(before, after, forwarded_bytes=None, peak_rss=None):
+    seconds = (after["sample_ns"] - before["sample_ns"]) / 1e9
+    hz = os.sysconf("SC_CLK_TCK")
+    user = (after["user_ticks"] - before["user_ticks"]) / hz
+    system = (after["system_ticks"] - before["system_ticks"]) / hz
+    runtime = ((after["runtime_ns"] - before["runtime_ns"]) / 1e9
+               if after["runtime_ns"] is not None and before["runtime_ns"] is not None else None)
+    cpu = runtime if runtime is not None else user + system
+    result = {"seconds": seconds, "user_cpu_seconds": user, "system_cpu_seconds": system,
+              "cpu_seconds": cpu, "cpu_source": "schedstat" if runtime is not None else "stat_ticks",
+              "cpu_percent_one_core": cpu / seconds * 100 if seconds else None,
+              "cpu_seconds_per_forwarded_gbit": cpu / (forwarded_bytes * 8 / 1e9) if forwarded_bytes else None,
+              "rss_bytes": after["rss_bytes"], "virtual_bytes": after["virtual_bytes"],
+              "peak_sampled_rss_bytes": peak_rss if peak_rss is not None else max(before["rss_bytes"], after["rss_bytes"]),
+              "process_lifetime_peak_rss_bytes": after["hwm_rss_bytes"],
+              "threads": after["threads"], "fds": after["fds"]}
+    for key in ("voluntary_switches", "involuntary_switches", "minor_faults", "major_faults", "cpu_migrations", "runqueue_ns", "timeslices"):
+        result[key] = after[key] - before[key] if before[key] is not None and after[key] is not None else None
+    return result
 
 
 def main():

@@ -48,3 +48,12 @@ directly under reproducible workloads before making throughput claims. The manua
 Benchmarks workflow records hosted-runner measurements and direct-origin controls;
 inspect all repetitions and artifacts, and retain failures. Harness changes must
 preserve bounded echo credit, failed-run JSON/nonzero status and cancellation cleanup.
+
+For dataplane work, compare baseline/candidate in one Benchmarks job. Check separate
+generator/origin CPU, measurement-window skew, repeated paired deltas, tail latency
+under bulk load, exact payload validation and post-drain fd ownership. Measure
+`-Ddataplane_metrics=true` observer overhead against ordinary ReleaseFast. Perf
+availability is a measured capability, not a prerequisite; missing counters are null.
+Run `test/bench_lab.py` against an instrumented binary and instrumented unit tests in
+Debug and ReleaseFast. Never retain an experimental dataplane solely on a noisy
+hosted-runner throughput result.

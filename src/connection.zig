@@ -6,11 +6,30 @@ const Config = config_mod.Config;
 const Counters = @import("counters.zig").Counters;
 const Buffer = @import("buffer.zig").Buffer;
 const outcome = @import("io_result.zig");
+const metrics = @import("metrics.zig");
+const relay_pipe = @import("relay_pipe.zig");
+pub const relay_byte_budget = 262144;
 
 pub const Connect = struct { fd: i32, complete: bool };
 pub const State = enum { hello, connecting, relaying, closed };
 pub const CloseReason = enum { complete, invalid_hello, no_route, connect_failed, io_error, timeout, stopping };
-pub const Direction = struct { buffer: Buffer, eof: bool = false, fin: bool = false };
+pub const Direction = struct {
+    buffer: Buffer,
+    eof: bool = false,
+    fin: bool = false,
+    pipe: if (relay_pipe.enabled) ?relay_pipe.Pipe else void = if (relay_pipe.enabled) null else {},
+
+    fn queued(self: *const Direction) usize {
+        if (relay_pipe.enabled) if (self.pipe) |pipe| return pipe.pending;
+        return self.buffer.len;
+    }
+
+    fn canRead(self: *const Direction) bool {
+        if (self.eof) return false;
+        if (relay_pipe.enabled) if (self.pipe) |pipe| return !pipe.read_paused and pipe.pending < pipe.capacity;
+        return self.buffer.len < self.buffer.data.len;
+    }
+};
 pub const Interest = struct { read: bool = false, write: bool = false };
 pub const IoFailure = struct { side: outcome.Side, operation: outcome.Operation, failure: outcome.Failure };
 
@@ -27,6 +46,9 @@ pub const Connection = struct {
     to_client: Direction,
     entered_ms: u64,
     activity_ms: u64,
+    splice_eligible: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
+    pipe_failed: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
+    short_reads: if (relay_pipe.enabled) u8 else void = if (relay_pipe.enabled) 0 else {},
 
     pub fn init(client: i32, stage: []u8, forward: []u8, reverse: []u8, now: u64) Connection {
         return .{
@@ -68,6 +90,15 @@ pub const Connection = struct {
     /// backend_ready is set only for the registered connect socket's event.
     /// No completion, callback, or borrowed slice can outlive this invocation.
     pub fn drive(self: *Connection, io: anytype, config: *const Config, now: u64, backend_ready: bool, counts: *Counters) void {
+        const before = if (metrics.enabled) io.metrics.progress() else 0;
+        const state_before = self.state;
+        io.metrics.add("drive_calls", 1);
+        defer if (metrics.enabled) {
+            if (io.metrics.progress() != before or self.state != state_before)
+                io.metrics.add("drive_useful", 1)
+            else
+                io.metrics.add("drive_no_progress", 1);
+        };
         self.expire(config.raw.value, now, counts);
         if (self.state == .closed) return;
         if (self.state == .hello) self.inspect(io, config, now, counts);
@@ -83,9 +114,28 @@ pub const Connection = struct {
             self.activity_ms = now;
         }
         if (self.state != .relaying) return;
-        if (!self.pump(io, &self.to_backend, self.client, self.backend, true, now, counts)) return;
-        if (!self.pump(io, &self.to_client, self.backend, self.client, false, now, counts)) return;
+        if (relay_pipe.enabled and self.short_reads == 32 and
+            self.to_backend.queued() == 0 and self.to_client.queued() == 0)
+        {
+            // A bulk stream can turn into short request/reply traffic. Queued
+            // debt still precedes this transition; pipes are already returned.
+            self.splice_eligible = false;
+            self.short_reads = 0;
+            io.metrics.add("pipe_deactivations", 1);
+        }
+        if (!self.pump(io, &self.to_backend, self.client, self.backend, true, now, counts) or self.state == .closed) return;
+        if (!self.pump(io, &self.to_client, self.backend, self.client, false, now, counts) or self.state == .closed) return;
         if (self.to_backend.fin and self.to_client.fin) self.close(.complete);
+    }
+
+    /// Borrowed metadata never retains kernel ownership across slot reuse.
+    pub fn release(self: *Connection, _: anytype) void {
+        if (relay_pipe.enabled) {
+            if (self.to_backend.pipe) |pipe| std.debug.assert(pipe.pending == 0);
+            if (self.to_client.pipe) |pipe| std.debug.assert(pipe.pending == 0);
+            self.to_backend.pipe = null;
+            self.to_client.pipe = null;
+        }
     }
 
     /// EPOLLERR and drained ENOTCONN use the same probe and accounting path.
@@ -154,70 +204,139 @@ pub const Connection = struct {
     }
 
     fn pump(self: *Connection, io: anytype, direction: *Direction, source: i32, target: i32, forward: bool, now: u64, counts: *Counters) bool {
+        // Shared pipes belong to this serving owner, never to a connection.
+        // A callback may borrow them only while empty, and must return them
+        // empty on every path, including blocked writes, fairness and resets.
+        defer if (relay_pipe.enabled) self.reclaimPipe(io, direction, forward, counts);
+        if (forward) io.metrics.add("pump_forward", 1) else io.metrics.add("pump_reverse", 1);
         var calls: usize = 0;
         var sent: usize = 0;
         var read_blocked = false;
         var write_blocked = false;
         // Drain multiple chunks in one readiness turn, with a fairness quantum.
         // Level-triggered epoll redispatches unfinished ready work.
-        while (calls < 128 and sent < 256 * 1024) {
+        while (calls < 128 and sent < relay_byte_budget) {
             var progress = false;
             const has_prefix = forward and self.stage != null;
-            const queued = if (has_prefix) self.stage.?[self.stage_sent..self.stage_len] else direction.buffer.readable();
-            if (queued.len != 0 and !write_blocked) {
+            const queued = if (has_prefix) self.stage_len - self.stage_sent else direction.queued();
+            if (queued != 0 and !write_blocked) {
                 calls += 1;
-                const n = switch (io.send(target, queued[0..@min(queued.len, 256 * 1024 - sent)])) {
+                const limit = @min(queued, relay_byte_budget - sent);
+                const result = if (has_prefix)
+                    io.send(target, self.stage.?[self.stage_sent..][0..limit])
+                else if (relay_pipe.enabled and direction.pipe != null)
+                    io.spliceWrite(direction.pipe.?.fds[0], target, limit)
+                else
+                    io.send(target, direction.buffer.readable()[0..@min(direction.buffer.readable().len, limit)]);
+                const n = switch (result) {
                     .ok => |n| n,
                     .err => |err| blk: {
                         if (err != .AGAIN) {
+                            io.metrics.add("pump_fatal", 1);
                             self.failIo(if (forward) .backend else .client, .write, .{ .errno = err }, counts);
                             return false;
                         }
                         write_blocked = true;
+                        io.metrics.add("pump_write_again", 1);
                         break :blk 0;
                     },
                 };
                 if (n == 0 and !write_blocked) {
+                    io.metrics.add("pump_fatal", 1);
                     self.failIo(if (forward) .backend else .client, .write, .zero_write, counts);
                     return false;
                 }
                 if (n != 0) {
                     if (has_prefix) {
                         self.stage_sent += n;
-                        if (self.stage_sent == self.stage_len) self.stage = null;
-                    } else direction.buffer.consumed(n);
+                        if (self.stage_sent == self.stage_len) {
+                            self.stage = null;
+                            io.metrics.add("prefix_completed", 1);
+                        }
+                    } else if (relay_pipe.enabled and direction.pipe != null) {
+                        const pipe = &direction.pipe.?;
+                        std.debug.assert(n <= pipe.pending);
+                        pipe.pending -= n;
+                        pipe.read_paused = false;
+                    } else {
+                        if (metrics.enabled and n == direction.buffer.len) io.metrics.add("ring_drained", 1);
+                        direction.buffer.consumed(n);
+                    }
                     if (forward) counts.bytes_client_to_backend +%= n else counts.bytes_backend_to_client +%= n;
                     self.activity_ms = now;
                     sent += n;
                     progress = true;
                 }
             }
-            if ((!forward or self.stage == null) and !direction.eof and !read_blocked and direction.buffer.len < direction.buffer.data.len and calls < 128) {
+            // Do not read ahead after yielding this direction's send budget.
+            // LT source readiness resumes the queue, including a pending EOF.
+            if ((!forward or self.stage == null) and direction.canRead() and !read_blocked and calls < 128 and sent < relay_byte_budget and
+                (write_blocked or direction.queued() < relay_byte_budget - sent))
+            {
+                // Drain this direction's ring debt first, then resume splice
+                // in the same callback. Variable read sizes and fairness must
+                // not strand a bulk stream on the copying path after one spill.
+                if (relay_pipe.enabled and self.stage == null and direction.pipe == null and direction.buffer.len == 0 and
+                    self.splice_eligible and !self.pipe_failed)
+                {
+                    if (io.openRelayPipes(direction.buffer.data.len)) |pipes|
+                        direction.pipe = pipes[if (forward) @as(usize, 0) else 1]
+                    else
+                        self.pipe_failed = true;
+                }
                 calls += 1;
-                const n = switch (io.recv(source, direction.buffer.writable())) {
+                const room = if (write_blocked) std.math.maxInt(usize) else relay_byte_budget - sent - direction.queued();
+                const result = if (relay_pipe.enabled and direction.pipe != null)
+                    io.spliceRead(source, direction.pipe.?.fds[1], @min(room, direction.pipe.?.capacity - direction.pipe.?.pending))
+                else
+                    io.recv(source, direction.buffer.writable()[0..@min(room, direction.buffer.writable().len)]);
+                const n = switch (result) {
                     .ok => |n| n,
                     .err => |err| blk: {
                         if (err != .AGAIN) {
+                            io.metrics.add("pump_fatal", 1);
                             self.failIo(if (forward) .client else .backend, .read, .{ .errno = err }, counts);
                             return false;
                         }
                         read_blocked = true;
+                        // Pipe page slots can fill before its byte capacity.
+                        // Pending output guarantees redispatch on the target;
+                        // retry source input only after a successful drain.
+                        if (relay_pipe.enabled and direction.pipe != null and direction.pipe.?.pending != 0)
+                            direction.pipe.?.read_paused = true;
+                        io.metrics.add("pump_read_again", 1);
                         break :blk 0;
                     },
                 };
                 if (!read_blocked) {
-                    if (n == 0) direction.eof = true else {
+                    if (n == 0) {
+                        direction.eof = true;
+                        io.metrics.add("pump_eof", 1);
+                    } else if (relay_pipe.enabled and direction.pipe != null) {
+                        std.debug.assert(n <= direction.pipe.?.capacity - direction.pipe.?.pending);
+                        direction.pipe.?.pending += n;
+                        self.short_reads = if (n < 1024) @min(self.short_reads + 1, 32) else 0;
+                        self.activity_ms = now;
+                    } else {
+                        // A long sequence of tiny messages is still a small-I/O
+                        // workload. Enter the pipe path only after a large
+                        // opaque read, never because the ClientHello was large.
+                        if (relay_pipe.enabled and n >= 16384) self.splice_eligible = true;
+                        if (metrics.enabled and (direction.buffer.head + direction.buffer.len) % direction.buffer.data.len + n == direction.buffer.data.len)
+                            io.metrics.add("ring_wrap", 1);
                         direction.buffer.produced(n);
+                        if (metrics.enabled and direction.buffer.len == direction.buffer.data.len) io.metrics.add("ring_full", 1);
                         self.activity_ms = now;
                     }
                     progress = true;
                 }
             }
-            if (direction.eof and direction.buffer.len == 0 and (!forward or self.stage == null) and !direction.fin) {
+            if (direction.eof and direction.queued() == 0 and (!forward or self.stage == null) and !direction.fin) {
                 switch (io.shutdown(target)) {
                     .ok => {},
                     .err => |err| {
                         if (err != .NOTCONN) {
+                            io.metrics.add("pump_fatal", 1);
                             self.failIo(if (forward) .backend else .client, .shutdown, .{ .errno = err }, counts);
                             return false;
                         }
@@ -229,9 +348,42 @@ pub const Connection = struct {
                 }
                 direction.fin = true;
             }
-            if (!progress) break;
+            if (!progress) {
+                if (metrics.enabled and !direction.eof and !direction.canRead()) io.metrics.add("pump_buffer_full", 1);
+                if (!read_blocked and !write_blocked) io.metrics.add("pump_no_work", 1);
+                break;
+            }
         }
+        if (calls >= 128) io.metrics.add("pump_call_budget", 1);
+        if (sent >= relay_byte_budget) io.metrics.add("pump_byte_budget", 1);
         return true;
+    }
+
+    fn reclaimPipe(self: *Connection, io: anytype, direction: *Direction, forward: bool, counts: *Counters) void {
+        const pipe = direction.pipe orelse return;
+        direction.pipe = null;
+        if (pipe.pending == 0) return;
+        std.debug.assert(direction.buffer.len == 0 and pipe.pending <= direction.buffer.data.len);
+        var copied: usize = 0;
+        while (copied < pipe.pending) {
+            const n = switch (io.readRelayPipe(pipe.fds[0], direction.buffer.data[copied..pipe.pending])) {
+                .ok => |n| n,
+                .err => |err| {
+                    io.disableSharedPipes();
+                    self.failIo(if (forward) .client else .backend, .read, .{ .errno = err }, counts);
+                    return;
+                },
+            };
+            if (n == 0) {
+                io.disableSharedPipes();
+                self.failIo(if (forward) .client else .backend, .read, .{ .errno = .IO }, counts);
+                return;
+            }
+            copied += n;
+        }
+        io.metrics.add("pipe_spills", 1);
+        io.metrics.add("pipe_spill_bytes", copied);
+        if (self.state != .closed) direction.buffer = .{ .data = direction.buffer.data, .len = copied };
     }
 
     pub fn interest(self: *const Connection, backend: bool) Interest {
@@ -240,11 +392,11 @@ pub const Connection = struct {
             .connecting => if (backend) .{ .write = true } else .{},
             .closed => .{},
             .relaying => if (backend) .{
-                .read = !self.to_client.eof and self.to_client.buffer.len < self.to_client.buffer.data.len,
-                .write = self.stage != null or self.to_backend.buffer.len != 0,
+                .read = self.to_client.canRead(),
+                .write = self.stage != null or self.to_backend.queued() != 0,
             } else .{
-                .read = self.stage == null and !self.to_backend.eof and self.to_backend.buffer.len < self.to_backend.buffer.data.len,
-                .write = self.to_client.buffer.len != 0,
+                .read = self.stage == null and self.to_backend.canRead(),
+                .write = self.to_client.queued() != 0,
             },
         };
     }

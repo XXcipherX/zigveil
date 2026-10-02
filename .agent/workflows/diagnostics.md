@@ -57,6 +57,10 @@ or policy-denied listener. Check stderr and listener ownership/OS policy.
 
 Check `/proc/$PID/fd`, `/proc/$PID/status` and OS TCP memory alongside counters.
 Reserved buffer bytes, RSS and kernel socket memory measure different resources.
+Four additional idle fds may belong to the process's shared relay pipes after
+bulk traffic. They must stay constant across connection churn; no connection may
+retain bytes in them after its callback. Instrumented SIGUSR1 snapshots distinguish
+splice traffic, ring spills, activation/fallback and the shared pipe capacity.
 Capacity sums across SO_REUSEPORT processes. A staging shortage may occur while
 established relays still have connection capacity; inspect slow hello/connect/prefix
 progress rather than increasing every pool blindly.

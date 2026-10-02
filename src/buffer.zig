@@ -22,8 +22,10 @@ pub const Buffer = struct {
 
     pub fn consumed(self: *Buffer, count: usize) void {
         std.debug.assert(count <= self.len);
-        self.head = (self.head + count) % self.data.len;
         self.len -= count;
+        // An empty queue has no borrowed data. Reuse its full contiguous span
+        // rather than splitting the next read at the previous short-send head.
+        self.head = if (self.len == 0) 0 else (self.head + count) % self.data.len;
     }
 };
 
@@ -41,4 +43,26 @@ test "partial consumption, wrap and bounded backpressure" {
     try std.testing.expectEqualStrings("fgh", queue.readable());
     queue.consumed(3);
     try std.testing.expectEqualStrings("ijklm", queue.readable());
+}
+
+test "a drained short or wrapped queue restores a full writable span" {
+    var bytes: [7]u8 = undefined;
+    var queue: Buffer = .{ .data = &bytes };
+    @memcpy(queue.writable()[0..3], "abc");
+    queue.produced(3);
+    queue.consumed(3);
+    try std.testing.expectEqual(@as(usize, 7), queue.writable().len);
+    @memcpy(queue.writable()[0..6], "defghi");
+    queue.produced(6);
+    queue.consumed(5);
+    @memcpy(queue.writable(), "j");
+    queue.produced(1);
+    @memcpy(queue.writable()[0..3], "klm");
+    queue.produced(3);
+    try std.testing.expectEqualStrings("ij", queue.readable());
+    queue.consumed(2);
+    try std.testing.expectEqualStrings("klm", queue.readable());
+    queue.consumed(3);
+    try std.testing.expectEqual(@as(usize, 0), queue.head);
+    try std.testing.expectEqual(@as(usize, 7), queue.writable().len);
 }

@@ -53,6 +53,13 @@ RDHUP/HUP is a hint, recv(0) is EOF. EOF plus drained debt causes one SHUT_WR;
 reverse traffic remains allowed. Both FIN halves finish normally; errors close
 both fds. Cached events validate generation and role before state access.
 
+Bulk-eligible callbacks may borrow the serving owner's two empty splice pipes.
+Always reclaim pending pipe bytes before returning, on every success/error/yield
+path. Spill live debt into that connection's bounded ring; discard fatal debt.
+Never carry another connection's bytes in a shared pipe across callbacks. Shared
+pipes close once with Io, never with a slot. Short-message fallback, prefix order,
+FIN-after-drain and typed socket failures remain the production state machine.
+
 ENOTCONN after drained SHUT_WR completes only that half when SO_ERROR is clear;
 pending errors remain fatal. Config self-target checks cover exact addresses and
 wildcard loopback, with mapped IPv4 aliases and V6ONLY family separation. They do
@@ -78,9 +85,12 @@ All formatting is bounded and occurs after filtering; stderr writes may block.
 ## Resource and time model
 
 Buffer capacity = `connections × 2 × ring_bytes + handshakes × 65536`.
-Defaults: 1024/64 slots, 16384-byte rings, 36 MiB reserved buffer space.
+Defaults: 1024/64 slots, 65536-byte rings, 132 MiB reserved buffer space.
 Metadata and kernel socket memory are additional; virtual capacity is not RSS.
-All allocations happen at startup. Do not introduce per-packet allocation, copies
+User-owned slabs allocate at startup. Splice acquires a fixed pair of kernel
+pipes lazily, with at most two ring capacities and four fds per process. Startup
+checks `2 × max_connections + 12` fds (`+ 8` when splice is disabled).
+Do not introduce per-packet allocation, copies
 for compaction, growing queues or hidden std.Io jobs.
 
 An indexed heap holds one timer per active slot, updated on phase changes and

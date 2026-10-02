@@ -10,4 +10,5 @@ test {
     _ = @import("counters.zig");
     _ = @import("backend.zig");
     _ = @import("log.zig");
+    _ = @import("metrics.zig");
 }

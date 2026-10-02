@@ -11,7 +11,7 @@ pub const Raw = struct {
     fallback: ?[]const u8 = null,
     max_connections: u32 = 1024,
     max_handshakes: u32 = 64,
-    relay_buffer_bytes: u32 = 16384,
+    relay_buffer_bytes: u32 = 65536,
     hello_timeout_ms: u32 = 5000,
     connect_timeout_ms: u32 = 5000,
     idle_timeout_ms: u32 = 300000,
@@ -144,7 +144,7 @@ test "exact canonical routes, missing and unknown names, fallback" {
     try std.testing.expect(config.lookup(&unknown) == null);
     try std.testing.expect(config.lookup(null) == null);
     try std.testing.expect(config.fallback != null);
-    try std.testing.expectEqual(@as(u64, 36 * 1024 * 1024), Config.bufferBytes(config.raw.value));
+    try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024), Config.bufferBytes(config.raw.value));
 }
 
 test "reject unknown keys, duplicate routes, invalid endpoints and resource limits" {

@@ -22,6 +22,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Error dimensions | Exact errno through production read/write/shutdown/SO_ERROR paths; both socket roles, unknown errno, zero writes, aggregate consistency and no double count |
 | Stats bounds | Maximum-width u64 values produce complete JSON within the fixed 4096-byte buffer |
 | Logging | Severity filtering, one-second delta batching, idle suppression, control/JSON escaping, maximum-width totals and byte units |
+| Shared kernel queues | Exact prefix ordering, empty borrow/return, slow writes and ring spills, uneven reads at fairness boundaries, source EAGAIN and page pressure, both FIN orders, RST/EPIPE/ENOTCONN, allocation failure, reuse and small/large phase transitions |
 | Time | Hello/connect/prefix/idle expiry and disabled established idle |
 | Lifetime | Pool exhaustion, role/generation tokens and stale events after reuse |
 | Timers | Indexed insertion/update/cancellation/reuse against an independent randomized model |
@@ -72,7 +73,7 @@ python3 test/bench_harness.py --binary zig-out/bin/zigveil
 ```
 
 The manually dispatched Benchmarks workflow records actual workloads and direct
-controls; see [the benchmark guide](../bench/README.md#github-actions).
+controls; see [the benchmark guide](../bench/README.md#paired-measurements).
 Timing bounds in integration
 tests allow event-batch delays and runner scheduling; throughput assertions and
 performance numbers are intentionally absent. Production-host soak, real client
@@ -99,3 +100,10 @@ install, actual traffic, refusal of insufficient fd capacity without disturbing 
 running service, config preservation and a real container update.
 The update also verifies log_level none, socket-based readiness and visible explicit
 preflight failures without depending on a startup banner.
+
+The optional `-Ddataplane_metrics=true` build has separate engine and real-socket
+coverage. `test/bench_lab.py` checks paired statistics, coordinated measurement
+windows, native/Python interoperability, two generators, exact bulk echo,
+under-load probes and child/fd cleanup. CI checks the shared splice default and
+the `-Drelay_splice=false` buffered control. Diagnostic counters compile out of
+ordinary builds and keep the production stats schema intact.

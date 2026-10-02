@@ -13,6 +13,7 @@ import harness
 import integration
 
 BINARY = None
+NATIVE = None
 
 
 def arguments(port, **overrides):
@@ -157,6 +158,20 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["errors"])
         self.assertIsNone(result["aggregate_forwarded_gbit_s"])
 
+    async def test_same_length_bulk_corruption_is_rejected(self):
+        async def corrupt(reader, writer):
+            wire = harness.client_hello("example.com")
+            writer.write(await reader.readexactly(len(wire)))
+            await writer.drain()
+            data = await reader.read(4096)
+            writer.write(bytes([data[0] ^ 1]) + data[1:])
+            await writer.drain()
+        async with origin(corrupt) as port:
+            result = await harness.run(arguments(port, concurrency=1))
+        self.assertFalse(result["valid"], result)
+        self.assertEqual(1, result["corruption_events"])
+        self.assertIsNone(result["echo_goodput_gbit_s"])
+
     async def test_cancellation_cleans_up_sender_tasks(self):
         async with origin(stalled_echo) as port:
             task = asyncio.create_task(harness.run(arguments(port, duration=60)))
@@ -203,6 +218,33 @@ class Harness(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(b"", stdout)
             self.assertIn(b"error:", stderr)
 
+    async def test_native_timeout_and_corruption_are_failed_json_measurements(self):
+        if NATIVE is None:
+            self.skipTest("supply --native-binary")
+        async def corrupt(reader, writer):
+            wire = harness.client_hello("example.com")
+            writer.write(await reader.readexactly(len(wire)))
+            await writer.drain()
+            data = await reader.read(4096)
+            writer.write(bytes([data[0] ^ 1]) + data[1:])
+            await writer.drain()
+        for handler, field in ((stalled_echo, "timed_out"), (corrupt, "corruption_events")):
+            async with origin(handler) as port:
+                process = await asyncio.create_subprocess_exec(
+                    NATIVE, "run", "--port", str(port), "--duration", ".1", "--drain-timeout", ".1",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), 5)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+            result = json.loads(stdout)
+            self.assertEqual(1, process.returncode)
+            self.assertFalse(result["valid"], result)
+            self.assertTrue(result[field], result)
+            self.assertIsNone(result["echo_goodput_gbit_s"])
+
     async def test_thousand_streams_through_production_proxy_drain_cleanly(self):
         if BINARY is None:
             self.skipTest("supply --binary for the Linux production relay regression")
@@ -227,6 +269,8 @@ class Harness(unittest.IsolatedAsyncioTestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary")
+    parser.add_argument("--native-binary")
     options = parser.parse_args()
     BINARY = str(Path(options.binary).resolve()) if options.binary else None
+    NATIVE = str(Path(options.native_binary).resolve()) if options.native_binary else None
     unittest.main(argv=[sys.argv[0]], verbosity=2)

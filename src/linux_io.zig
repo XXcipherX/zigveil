@@ -4,37 +4,49 @@ const linux = std.os.linux;
 const Address = @import("config.zig").Address;
 const Connect = @import("connection.zig").Connect;
 const Result = @import("io_result.zig").Result;
+const relay_pipe = @import("relay_pipe.zig");
 
 pub const Io = struct {
-    pub fn recv(_: *Io, fd: i32, bytes: []u8) Result(usize) {
+    metrics: @import("metrics.zig").Metrics = .{},
+    shared_pipes: if (relay_pipe.enabled) ?relay_pipe.Pair else void = if (relay_pipe.enabled) null else {},
+    shared_attempted: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
+
+    pub fn recv(self: *Io, fd: i32, bytes: []u8) Result(usize) {
         while (true) {
             const rc = linux.recvfrom(fd, bytes.ptr, bytes.len, 0, null, null);
+            self.metrics.recvResult(rc);
             if (linux.errno(rc) == .INTR) continue;
             return transferResult(rc);
         }
     }
 
-    pub fn send(_: *Io, fd: i32, bytes: []const u8) Result(usize) {
+    pub fn send(self: *Io, fd: i32, bytes: []const u8) Result(usize) {
         while (true) {
             const rc = linux.sendto(fd, bytes.ptr, bytes.len, linux.MSG.NOSIGNAL, null, 0);
+            self.metrics.sendResult(rc, bytes.len);
             if (linux.errno(rc) == .INTR) continue;
             return transferResult(rc);
         }
     }
 
-    pub fn shutdown(_: *Io, fd: i32) Result(void) {
+    pub fn shutdown(self: *Io, fd: i32) Result(void) {
         while (true) {
+            self.metrics.add("shutdown", 1);
             const err = linux.errno(linux.shutdown(fd, 1)); // SHUT_WR
             if (err == .INTR) continue;
             return statusResult(err);
         }
     }
 
-    pub fn startConnect(_: *Io, endpoint: Address) !Connect {
+    pub fn startConnect(self: *Io, endpoint: Address) !Connect {
         const addr = SockAddress.init(endpoint);
         const fd = try socket(addr.storage.family);
-        errdefer close(fd);
+        errdefer {
+            self.metrics.add("close", 1);
+            close(fd);
+        }
         try option(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1);
+        self.metrics.add("connect", 1);
         const rc = linux.connect(fd, &addr.storage, addr.len);
         return switch (linux.errno(rc)) {
             .SUCCESS => .{ .fd = fd, .complete = true },
@@ -43,15 +55,105 @@ pub const Io = struct {
         };
     }
 
-    pub fn finishConnect(_: *Io, fd: i32) !void {
-        switch (socketError(fd)) {
+    pub fn finishConnect(self: *Io, fd: i32) !void {
+        switch (socketErrorMeasured(fd, &self.metrics)) {
             .ok => {},
             .err => return error.SocketError,
         }
     }
 
-    pub fn checkSocketError(_: *Io, fd: i32) Result(void) {
-        return socketError(fd);
+    pub fn checkSocketError(self: *Io, fd: i32) Result(void) {
+        return socketErrorMeasured(fd, &self.metrics);
+    }
+
+    pub fn openRelayPipes(self: *Io, capacity: usize) ?relay_pipe.Pair {
+        if (!relay_pipe.enabled) return null;
+        if (relay_pipe.enabled) {
+            if (self.shared_attempted) {
+                if (self.shared_pipes != null) self.metrics.add("pipe_reuses", 1);
+                return self.shared_pipes;
+            }
+            self.shared_attempted = true;
+        }
+        var pipes: relay_pipe.Pair = undefined;
+        var opened: usize = 0;
+        var complete = false;
+        defer if (!complete) {
+            for (pipes[0..opened]) |pipe| for (pipe.fds) |fd| {
+                self.metrics.add("close", 1);
+                close(fd);
+            };
+            self.metrics.add("pipe_fallbacks", 1);
+        };
+        for (&pipes) |*pipe| {
+            self.metrics.add("pipe2", 1);
+            if (linux.errno(linux.pipe2(&pipe.fds, .{ .NONBLOCK = true, .CLOEXEC = true })) != .SUCCESS) return null;
+            opened += 1;
+            self.metrics.add("fcntl", 1);
+            const rc = linux.fcntl(pipe.fds[0], linux.F.SETPIPE_SZ, capacity);
+            // Never serve through tiny quota-reduced pipes. Both allocations
+            // must meet the bounded configured capacity or use the ring path.
+            if (linux.errno(rc) != .SUCCESS or rc != capacity) return null;
+            pipe.capacity = capacity;
+            pipe.pending = 0;
+            pipe.read_paused = false;
+        }
+        complete = true;
+        self.metrics.add("pipe_activations", 1);
+        self.metrics.add("pipe_live", 1);
+        self.metrics.maximum("pipe_max_capacity", capacity);
+        if (relay_pipe.enabled) {
+            self.shared_pipes = pipes;
+            self.metrics.maximum("shared_pipe_capacity", capacity);
+        }
+        return pipes;
+    }
+
+    fn destroyPipes(self: *Io, pipes: relay_pipe.Pair) void {
+        self.metrics.add("pipe_live", std.math.maxInt(u64));
+        for (pipes) |pipe| for (pipe.fds) |fd| {
+            self.metrics.add("close", 1);
+            close(fd);
+        };
+    }
+
+    pub fn disableSharedPipes(self: *Io) void {
+        if (relay_pipe.enabled) if (self.shared_pipes) |pipes| {
+            self.destroyPipes(pipes);
+            self.shared_pipes = null;
+        };
+    }
+
+    pub fn deinit(self: *Io) void {
+        self.disableSharedPipes();
+    }
+
+    pub fn readRelayPipe(self: *Io, fd: i32, bytes: []u8) Result(usize) {
+        while (true) {
+            self.metrics.add("pipe_read", 1);
+            const rc = linux.read(fd, bytes.ptr, bytes.len);
+            if (linux.errno(rc) == .INTR) continue;
+            return transferResult(rc);
+        }
+    }
+
+    pub fn spliceRead(self: *Io, source: i32, pipe: i32, bytes: usize) Result(usize) {
+        return self.spliceTransfer(source, pipe, bytes, true);
+    }
+
+    pub fn spliceWrite(self: *Io, pipe: i32, target: i32, bytes: usize) Result(usize) {
+        return self.spliceTransfer(pipe, target, bytes, false);
+    }
+
+    fn spliceTransfer(self: *Io, source: i32, target: i32, bytes: usize, comptime read: bool) Result(usize) {
+        while (true) {
+            // Linux splice ABI; null offsets for sockets/pipes. All four pipe
+            // ends and both sockets are nonblocking. SPLICE_F_NONBLOCK = 2.
+            const rc = linux.syscall6(.splice, @intCast(source), 0, @intCast(target), 0, bytes, 2);
+            self.metrics.spliceResult(rc, bytes, read);
+            if (linux.errno(rc) == .INTR) continue;
+            return transferResult(rc);
+        }
     }
 };
 
@@ -106,7 +208,12 @@ pub fn option(fd: i32, level: i32, name: u32, value: i32) !void {
 }
 
 pub fn socketError(fd: i32) Result(void) {
+    return socketErrorMeasured(fd, null);
+}
+
+fn socketErrorMeasured(fd: i32, metrics: ?*@import("metrics.zig").Metrics) Result(void) {
     while (true) {
+        if (metrics) |m| m.add("getsockopt", 1);
         var value: i32 = 0;
         var len: linux.socklen_t = @sizeOf(i32);
         const err = linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&value), &len));
@@ -165,12 +272,18 @@ pub fn nowMs() !u64 {
 
 pub fn checkFdLimit(max_connections: u32) !void {
     const limit = try std.posix.getrlimit(.NOFILE);
-    if (limit.cur < @as(u64, max_connections) * 2 + 8) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus8;
+    if (relay_pipe.enabled) {
+        if (limit.cur < @as(u64, max_connections) * 2 + 12) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus12;
+    } else if (limit.cur < @as(u64, max_connections) * 2 + 8) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus8;
 }
 
 pub fn print(comptime format: []const u8, args: anytype) void {
     var storage: [4096]u8 = undefined;
     const bytes = std.fmt.bufPrint(&storage, format, args) catch return;
+    printBytes(bytes);
+}
+
+pub fn printBytes(bytes: []const u8) void {
     var offset: usize = 0;
     while (offset != bytes.len) {
         const rc = linux.write(2, bytes[offset..].ptr, bytes.len - offset);

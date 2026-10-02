@@ -39,7 +39,7 @@ diagnostic and reports failure even when automatic daemon logs are disabled.
 1. Prepare the Linux service host and dedicated `zigveil` user/group.
 2. Copy the binary to `/usr/local/bin/zigveil` and a validated operator config to
    `/etc/zigveil/config.json`. Replace documentation-only endpoint addresses.
-3. Ensure the descriptor limit covers `2 × max_connections + 8`. The supplied unit
+3. Ensure the descriptor limit covers `2 × max_connections + 12`. The supplied unit
    sets 65536; increase it if your configured capacity requires more.
 4. Check backend reachability, avoid routes back to the proxy, and run `--check`.
 5. Install `deploy/zigveil.service` as `/etc/systemd/system/zigveil.service`, then

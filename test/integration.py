@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 
 BINARY = "zig-out/bin/zigveil"
+SPLICE = False
+DIAGNOSTICS = False
 IO_OPERATIONS = ("client_read_errors", "client_write_errors", "backend_read_errors", "backend_write_errors",
                  "client_shutdown_errors", "backend_shutdown_errors", "client_socket_errors", "backend_socket_errors")
 IO_CAUSES = ("connection_resets", "broken_pipes", "not_connected", "connection_aborts",
@@ -133,7 +135,7 @@ class Daemon:
         self.config = {"listen": f"127.0.0.1:{self.port}",
                        "routes": [{"sni": "example.com", "backend": backend}],
                        "max_connections": 32, "max_handshakes": 16,
-                       "relay_buffer_bytes": 4096, "stats_interval_ms": 0,
+                       "relay_buffer_bytes": 65536 if SPLICE else 4096, "stats_interval_ms": 0,
                        "log_format": "json"}
         self.config.update(overrides)
         self.port = int(self.config["listen"].rsplit(":", 1)[1])
@@ -207,9 +209,12 @@ class Daemon:
     def snapshot(self):
         def snapshots():
             return [event for event in self.events() if event.get("event") == "stats"]
+        def diagnostics():
+            return [event for event in self.events() if event.get("event") == "dataplane"]
         old = len(snapshots())
+        old_diagnostics = len(diagnostics())
         self.process.send_signal(signal.SIGUSR1)
-        self.wait_for(lambda: len(snapshots()) > old)
+        self.wait_for(lambda: len(snapshots()) > old and (not DIAGNOSTICS or len(diagnostics()) > old_diagnostics))
         return snapshots()[-1]
 
     @contextlib.contextmanager
@@ -483,8 +488,10 @@ class Integration(unittest.TestCase):
             self.assertNotIn("DEBUG", logs)
             self.assertNotIn("io_errors=0", logs)
             old = len(logs)
+            old_diagnostics = len([e for e in proxy.events() if e.get("event") == "dataplane"])
             proxy.process.send_signal(signal.SIGUSR1)
-            proxy.wait_for(lambda: "traffic sent=" in proxy.logs()[old:])
+            proxy.wait_for(lambda: "traffic sent=" in proxy.logs()[old:] and
+                           (not DIAGNOSTICS or len([e for e in proxy.events() if e.get("event") == "dataplane"]) > old_diagnostics))
             self.assertIn("totals active=0 accepted=1 routed=1 closed=1", proxy.logs()[old:])
             # Idle timer ticks must not repeat the same totals or status line.
             stable = proxy.logs()
@@ -626,6 +633,53 @@ class Integration(unittest.TestCase):
                     proxy.wait_for(lambda: proxy.snapshot()["active"] == 1)
                     self.assertEqual(baseline, len(os.listdir(f"/proc/{pid}/fd")))
 
+    def test_splice_partial_pipe_allocation_pressure_falls_back_and_reclaims_fds(self):
+        if not SPLICE:
+            self.skipTest("supply --splice with a splice build")
+        payload = bytes(range(256)) * 1024
+        with Origin() as origin, Daemon(origin.address, relay_buffer_bytes=65536) as proxy:
+            pid = proxy.process.pid
+            old = resource.prlimit(pid, resource.RLIMIT_NOFILE)
+            with proxy.connect() as client:
+                client.sendall(hello())
+                self.assertEqual(hello(), exact(client, len(hello())))
+                baseline = len(os.listdir(f"/proc/{pid}/fd"))
+                try:
+                    resource.prlimit(pid, resource.RLIMIT_NOFILE, (baseline + 2, old[1]))
+                    client.sendall(payload)
+                    self.assertEqual(payload, exact(client, len(payload)))
+                    self.assertEqual(baseline, len(os.listdir(f"/proc/{pid}/fd")))
+                finally:
+                    resource.prlimit(pid, resource.RLIMIT_NOFILE, old)
+                client.sendall(payload)
+                self.assertEqual(payload, exact(client, len(payload)))
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(b"", client.recv(1))
+            proxy.wait_for(lambda: proxy.snapshot()["active"] == 0)
+            self.assertEqual(6, len(os.listdir(f"/proc/{pid}/fd")))
+            self.assert_io_dimensions(proxy.snapshot(), 0)
+
+    def test_splice_live_pipes_half_close_reset_and_repeated_slot_reuse(self):
+        if not SPLICE:
+            self.skipTest("supply --splice with a splice build")
+        payload = bytes(range(256)) * 512
+        with Origin() as origin, Daemon(origin.address, relay_buffer_bytes=65536) as proxy:
+            for cycle in range(16):
+                with proxy.connect() as client:
+                    client.sendall(hello() + payload)
+                    self.assertEqual(hello() + payload, exact(client, len(hello()) + len(payload)))
+                    client.sendall(payload)
+                    self.assertEqual(payload, exact(client, len(payload)))
+                    self.assertGreaterEqual(len(os.listdir(f"/proc/{proxy.process.pid}/fd")), 12)
+                    if cycle % 3 == 0:
+                        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    else:
+                        client.shutdown(socket.SHUT_WR)
+                        self.assertEqual(b"", client.recv(1))
+                proxy.wait_for(lambda: proxy.snapshot()["active"] == 0)
+                self.assertEqual(10, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
+            self.assertEqual(16, proxy.snapshot()["closed"])
+
     def test_v6only_wildcard_routes_to_ipv4_backend_on_same_port(self):
         with Origin() as origin:
             for backend in (origin.address, f"[::ffff:127.0.0.1]:{origin.port}"):
@@ -714,6 +768,10 @@ class Integration(unittest.TestCase):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--binary", default=BINARY)
+    parser.add_argument("--splice", action="store_true", help="enable kernel pipe ownership regressions")
+    parser.add_argument("--diagnostics", action="store_true", help="wait for both SIGUSR1 records of an instrumented build")
     args, rest = parser.parse_known_args()
     BINARY = str(Path(args.binary).resolve())
+    SPLICE = args.splice
+    DIAGNOSTICS = args.diagnostics
     unittest.main(argv=[__file__, *rest], verbosity=2)

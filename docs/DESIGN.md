@@ -22,7 +22,7 @@ or zero-copy sends. It also requires SQ/CQ sizing, buffer lifetime until complet
 cancellation discipline and completion/notification handling. Those mechanisms are
 valuable when measured syscall or kernel-copy cost justifies them.
 
-This baseline chooses epoll with nonblocking sockets. A handler can send a queued
+The serving loop uses epoll with nonblocking sockets. A handler can send a queued
 chunk, receive the next chunk and send again without another notification round.
 This is especially useful when one stream spans many buffers. It does not prove
 epoll inherently faster than a pipelined io_uring implementation; strict serialized
@@ -177,12 +177,36 @@ No compaction, packet allocation or unbounded read-ahead exists. A blocked write
 may fill the remaining ring, then suppresses source readability. The opposite
 direction remains independently schedulable.
 
-One pump attempts at most 128 recv/send calls and sends at most 256 KiB per turn.
+One pump attempts at most 128 socket transfer calls and sends at most 256 KiB per turn.
 EAGAIN records a local stop condition so a pump does not repeatedly retry a blocked
 operation within that turn. The level-triggered interest set resumes unfinished
 work. HUP/RDHUP is a hint: actual zero-byte recv establishes EOF. Data already in
 the queue must drain before [SHUT_WR](https://man7.org/linux/man-pages/man2/shutdown.2.html).
 Only both completed halves or a fatal event end the connection.
+
+## Shared splice relay
+
+An opaque buffered read of at least 16 KiB makes a stream eligible for splice;
+prefix size and accumulated tiny messages do not. Activation waits for the prefix
+and that direction's ring debt to drain. Splice can resume in the same callback
+after draining a previous ring spill. Reads respect the remaining byte quantum
+while the destination is writable, avoiding fairness-induced pipe debt. The
+single serving owner lazily acquires two bounded
+NONBLOCK/CLOEXEC pipes, resized to the configured ring capacity. Failure closes
+partial allocations and leaves buffered forwarding available.
+
+Each callback borrows empty pipes. Socket-to-pipe and pipe-to-socket operations
+share the usual call/byte budgets. A blocked write, partial drain, budget yield
+or fatal socket error reclaims every pending pipe byte before another connection
+can borrow it. Live debt goes into that direction's empty ring; fatal debt is
+discarded. This bounded spill can require additional pipe reads at callback exit.
+An unexpected reclamation failure disables the process's pipe path and closes
+the affected connection. Ring data always precedes subsequent source data and FIN.
+
+After 32 consecutive splice reads below 1 KiB, an empty stream returns to buffered
+forwarding; a later large opaque read can requalify it. The shared pipes remain
+owned by Io and close once at server teardown. SIGPIPE is ignored only for the
+serving lifetime so splice EPIPE follows ordinary typed failure accounting.
 
 On a previously connected TCP socket Linux
 [inet_shutdown](https://github.com/torvalds/linux/blob/master/net/ipv4/af_inet.c)
@@ -199,11 +223,13 @@ EINTR. At generation exhaustion a slot is retired instead of wrapping.
 
 ## Memory, socket policy and deadlines
 
-Two 16 KiB rings cost 32 KiB per capacity slot. The separate default staging slab
+Two 64 KiB rings cost 128 KiB per capacity slot. The separate default staging slab
 costs 64 × 64 KiB = 4 MiB, not 64 KiB for every established stream. All sizes are
 startup reservations; virtual capacity, touched RSS and kernel socket memory are
 different measurements. Buffer capacity above 1 GiB is rejected and startup checks
-`RLIMIT_NOFILE >= 2 × max_connections + 8`. Pool/connection/config metadata is extra.
+`RLIMIT_NOFILE >= 2 × max_connections + 12`. Splice-disabled builds need `+ 8`.
+Shared pipe capacity is two ring sizes in kernel memory, with four process-owned
+fds regardless of stream count. Pool/connection/config metadata is extra.
 
 Startup uses NONBLOCK/CLOEXEC sockets, accept4 and a backlog of 1024. SO_REUSEADDR
 permits restarting a listener; SO_REUSEPORT is only for explicit process scale-out.
@@ -314,10 +340,24 @@ stay visible even with log_level none; this preserves actionable preflight failu
 
 ## Additional performance mechanisms
 
-Splice adds two pipes and four fds per bidirectional stream. send_zc introduces
-page/notification lifetime bookkeeping. Multishot recv changes buffer ownership
-and queue handling. The selected epoll/ring design gives direct drains and clear
-ownership without those mechanisms. Controlled long-lived-stream measurements
-can identify a concrete reason to revisit copying, submission cost or scheduling.
-Ring sizing, ET dispatch and lazy relay-buffer pooling are further tuning options.
-The implementation contains no dormant zero-copy or alternative-loop layer.
+The optional `-Ddataplane_metrics=true` build records syscall outcomes, pump exits,
+readiness batches, duplicate dispatch opportunities and interest transitions.
+`linux_io.Io` owns its single-threaded counters; snapshots are emitted only on
+SIGUSR1 as a separate `event: dataplane` JSON object. Ordinary builds use a zero-size
+metrics type and compile out updates and batch bookkeeping. Production stats and
+logging retain their existing schema and behavior. There are no per-packet clocks,
+strings, allocation, atomics or locks in this instrumentation.
+
+The benchmark coordinator establishes and warms all persistent streams before its
+ready/go barrier. It samples proxy, generator and origin CPU around the payload
+window, records boundary skew and tail drain separately, and verifies reclamation.
+Both baseline and candidate use the same harness on the same runner, alternating
+order across repetitions. Optional perf counters are gated at these boundaries;
+capability failures remain explicit missing measurements. Metrics builds and perf
+recording are diagnostic variants, with ordinary ReleaseFast results retained
+separately for performance comparisons.
+
+The selected splice path has fixed process-owned kernel queues and bounded ring
+spill. send_zc would introduce page/notification lifetime bookkeeping; multishot
+recv would change buffer ownership and queue handling. Alternative submission
+or event-loop designs require a measured bottleneck and paired verification.

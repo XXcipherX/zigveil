@@ -7,7 +7,7 @@
   ],
   "max_connections": 1024,
   "max_handshakes": 64,
-  "relay_buffer_bytes": 16384,
+  "relay_buffer_bytes": 65536,
   "hello_timeout_ms": 5000,
   "connect_timeout_ms": 5000,
   "idle_timeout_ms": 300000,
