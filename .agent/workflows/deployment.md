@@ -30,6 +30,9 @@ files or configure extra_hosts/dns when host-specific resolution is required. Th
 generated zigveil.service controls Compose and can replace the native unit after
 preflight. Test install/update behavior on an ephemeral systemd host, including
 config preservation and a failing preflight that leaves the running container intact.
+Readiness inspects a LISTEN socket owned by the container PID, so warn/error/none
+verbosity works too. Do not restore a startup-log dependency. --check is an explicit
+diagnostic and reports failure even when automatic daemon logs are disabled.
 
 ## Native systemd deployment
 

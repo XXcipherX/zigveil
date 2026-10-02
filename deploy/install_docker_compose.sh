@@ -190,8 +190,25 @@ fi
 systemctl is-active --quiet "$SERVICE_NAME.service" || fail "Service is not active; inspect journalctl -u zigveil"
 ready=false
 for ((attempt=0; attempt<20; attempt++)); do
-    logs="$(docker compose --project-name zigveil --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --no-color --tail 30 zigveil 2>&1)"
-    if [[ "$logs" == *"zigveil: listening on"* ]]; then ready=true; break; fi
+    container="$(docker compose --project-name zigveil --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps --all --quiet zigveil)"
+    pid="$(docker inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+        # Listener readiness must work at warn/error/none too. Match a LISTEN
+        # inode owned by this container process without creating probe traffic.
+        if { readlink /proc/"$pid"/fd/* 2>/dev/null || true; } | awk '
+            FILENAME == "-" {
+                if ($0 ~ /^socket:\[[0-9]+\]$/) {
+                    gsub(/^socket:\[|\]$/, ""); owned[$0] = 1
+                }
+                next
+            }
+            $4 == "0A" && owned[$10] { ready = 1 }
+            END { exit !ready }
+        ' - "/proc/$pid/net/tcp" "/proc/$pid/net/tcp6" 2>/dev/null; then
+            ready=true
+            break
+        fi
+    fi
     sleep 1
 done
 [[ "$ready" == true ]] || fail "Listener did not start; inspect Docker Compose logs"

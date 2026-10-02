@@ -21,6 +21,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Failures | Connect/read/write failures, fatal shutdown and ENOTCONN with pending reset on both peers |
 | Error dimensions | Exact errno through production read/write/shutdown/SO_ERROR paths; both socket roles, unknown errno, zero writes, aggregate consistency and no double count |
 | Stats bounds | Maximum-width u64 values produce complete JSON within the fixed 4096-byte buffer |
+| Logging | Severity filtering, one-second delta batching, idle suppression, control/JSON escaping, maximum-width totals and byte units |
 | Time | Hello/connect/prefix/idle expiry and disabled established idle |
 | Lifetime | Pool exhaustion, role/generation tokens and stale events after reuse |
 | Timers | Indexed insertion/update/cancellation/reuse against an independent randomized model |
@@ -39,6 +40,12 @@ self-target config rejection before bind, V6ONLY forwarding to IPv4/mapped backe
 on the listener port, a single OS thread and
 real TLS passthrough through an IPv6 backend. Certificates are generated temporarily
 by OpenSSL. It does not require third-party Python packages.
+
+Live logging tests check compact text, explicit grouped totals, warning bursts,
+info/warn/error/none filtering, the SIGUSR2 cycle, snapshots while muted and precise
+debug RST details without payload leakage or changes to error accounting. Invalid
+logging settings fail before bind. Readiness checks an owned socket without probe
+traffic and works independently of INFO output.
 
 Controlled client and backend RST tests use zero SO_LINGER after an echoed prefix.
 The daemon is stopped temporarily with SIGSTOP while RST is queued, then resumed:
@@ -78,3 +85,5 @@ read-only configuration, byte preservation, bulk, FIN and container shutdown.
 The installer E2E uses an ephemeral local registry and systemd host to verify first
 install, actual traffic, refusal of insufficient fd capacity without disturbing a
 running service, config preservation and a real container update.
+The update also verifies log_level none, socket-based readiness and visible explicit
+preflight failures without depending on a startup banner.

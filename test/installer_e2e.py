@@ -66,6 +66,12 @@ def run(image):
                 command("systemctl", "is-enabled", "--quiet", "zigveil.service")
                 command("systemctl", "is-active", "--quiet", "zigveil.service")
                 verify_stream(port)
+                # An operator may mute logs before an update. Readiness and the
+                # explicit --check preflight must not depend on INFO messages.
+                muted = json.loads(original)
+                muted["log_level"] = "none"
+                config.write_text(json.dumps(muted), encoding="utf-8")
+                original = config.read_bytes()
                 environment = (install_dir / ".env").read_bytes()
                 pid = command("docker", "inspect", "-f", "{{.State.Pid}}", "zigveil").stdout.strip()
                 # Enough for the container runtime, below Zigveil's 2056-fd minimum.
@@ -82,6 +88,8 @@ def run(image):
                 assert config.read_bytes() == original
                 assert command("docker", "inspect", "-f", "{{.State.Pid}}", "zigveil").stdout.strip() != pid
                 verify_stream(port)
+                logs = command("docker", "logs", "zigveil")
+                assert logs.stdout + logs.stderr == "", logs
             finally:
                 print(command("journalctl", "-u", "zigveil.service", "--no-pager", "-n", "80", check=False).stdout)
                 command("systemctl", "disable", "--now", "zigveil.service", check=False)

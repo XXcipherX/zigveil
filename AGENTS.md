@@ -29,6 +29,9 @@ Read the relevant project guides before changing behavior:
 10. Keep docs/config/test expectations aligned with implemented behavior.
 11. Preserve exact Linux errno by value. Count fatal I/O once, with one actual
     socket side/operation and one cause; keep accept/connect/deadline errors separate.
+12. Filter logs before formatting. Default output is compact text; debug lifecycle
+    details contain no payloads or client IPs. Preserve grouped warning rate limits,
+    idle suppression, explicit snapshots and the complete JSON counter schema.
 
 ## Change discipline
 

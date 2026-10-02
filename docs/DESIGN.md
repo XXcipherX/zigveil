@@ -227,10 +227,11 @@ At most 256 due entries are processed per event batch, balancing expiration work
 against socket/signal handling. These are algorithmic costs, not measured speedups.
 Timer nodes and indices add 20 bytes per capacity slot on the supported 64-bit targets.
 
-SIGINT/TERM/USR1 are blocked and consumed through signalfd in the owning loop.
+SIGINT/TERM/USR1/USR2 are blocked and consumed through signalfd in the owning loop.
 Shutdown stops accepts and drains for 30 seconds; the next signal requests an
-immediate stop. Counter snapshots are infrequent fixed-buffer stderr writes and
-must have a functioning log sink. There is no packet logging or HTTP admin server.
+immediate stop. SIGUSR1 requests totals, while SIGUSR2 cycles runtime verbosity.
+Diagnostics use fixed-buffer stderr writes and need a functioning sink.
+There is no packet logging or HTTP admin server.
 
 ## Socket error observability
 
@@ -275,7 +276,41 @@ Stats use the existing 4096-byte diagnostic capacity. A compile-time bound inclu
 every field name, punctuation, the newline and all u64 values at 20 digits; adding
 too many fields is a compile error instead of silent truncation. A unit test formats
 every field at maximum width and parses the complete JSON. Formatting happens only
-for an explicitly requested or periodic snapshot.
+for an explicitly requested or enabled JSON periodic/final snapshot.
+
+## Live logging
+
+`log.zig` owns the level, format and two previous counter snapshots through a Logger
+borrowed by Server from main. The serving loop owns all logger mutations, including
+SIGUSR2 level changes. There is no global logger, mutex, logging worker, heap queue
+or per-packet formatting. Levels are filtered before formatting or wall-clock I/O.
+
+Default text output has UTC timestamps, aligned severity labels and human-readable
+byte volumes. Periodic activity uses wrapping counter differences and the current
+active gauge; idle zero-activity intervals are suppressed. Warning/error differences
+are consumed at most once per second, with one grouped line per severity and a final
+flush on shutdown. Consuming disabled levels and resetting baselines on SIGUSR2
+prevents replay of errors that occurred while muted. Counters themselves never reset.
+Level changes flush enabled pending warning/activity data before resetting baselines.
+The [README](../README.md#logging) defines the severity policy and signal cycle.
+
+Detailed lifecycle output is opt-in at debug and occurs only at phase changes and
+teardown. A slot stores the fatal I/O side/operation/result only on failure, without
+another syscall or counter update. The ID is the generation-tagged client token,
+so reused slots remain distinguishable. Logs never borrow a staged name or payload.
+SIGUSR1 bypasses the verbosity threshold because it is an explicit diagnostic.
+Text totals omit zero fields; JSON retains the complete existing counter schema.
+
+Messages are bounded to 512 bytes and output lines to 4096. Counter groups have
+compile-time maximum-width bounds; JSON/text escaping prevents newlines and control
+bytes from forging events or terminal controls. The line bound covers six-byte JSON
+escapes for every message byte. Byte-unit arithmetic remains safe at maximum u64.
+Writes retry EINTR and partial writes, without growing storage; a blocked stderr can
+still stall the single serving loop. Debug verbosity is intended for diagnosis.
+
+Compose installer readiness checks an owned LISTEN socket through the container's
+host PID, rather than requiring a startup log at info. Explicit --check diagnostics
+stay visible even with log_level none; this preserves actionable preflight failures.
 
 ## Additional performance mechanisms
 

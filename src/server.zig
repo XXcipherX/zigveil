@@ -6,6 +6,7 @@ const Connection = @import("connection.zig").Connection;
 const Pool = @import("pool.zig").Pool;
 const Timers = @import("timers.zig").Timers;
 const Counters = @import("counters.zig").Counters;
+const logging = @import("log.zig");
 const hello_bytes = @import("client_hello.zig").max_wire_bytes;
 const Slot = struct {
     conn: Connection = undefined,
@@ -19,6 +20,7 @@ const Slot = struct {
 pub const Server = struct {
     allocator: std.mem.Allocator,
     config: *const Config,
+    log: *logging.Logger,
     slots: []Slot,
     pool: Pool,
     stages: Pool,
@@ -35,7 +37,7 @@ pub const Server = struct {
     accept_resume_ms: u64 = 0,
     stop_deadline_ms: ?u64 = null,
 
-    pub fn init(allocator: std.mem.Allocator, config: *const Config) !Server {
+    pub fn init(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger) !Server {
         const raw = config.raw.value;
         try net.checkFdLimit(raw.max_connections);
         const slots = try allocator.alloc(Slot, raw.max_connections);
@@ -59,6 +61,7 @@ pub const Server = struct {
         linux.sigaddset(&mask, .INT);
         linux.sigaddset(&mask, .TERM);
         linux.sigaddset(&mask, .USR1);
+        linux.sigaddset(&mask, .USR2);
         var previous_mask: linux.sigset_t = undefined;
         if (linux.errno(linux.sigprocmask(linux.SIG.BLOCK, &mask, &previous_mask)) != .SUCCESS) return error.SignalMaskFailed;
         errdefer _ = linux.sigprocmask(linux.SIG.SETMASK, &previous_mask, null);
@@ -73,6 +76,7 @@ pub const Server = struct {
         return .{
             .allocator = allocator,
             .config = config,
+            .log = log,
             .slots = slots,
             .pool = pool,
             .stages = stages,
@@ -101,11 +105,12 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
-        net.print("zigveil: listening on {s}; slots={d} staging={d} buffers={d} bytes\n", .{
-            self.config.raw.value.listen, self.slots.len, self.stages.entries.len, Config.bufferBytes(self.config.raw.value),
+        self.log.message(.info, "started", "listening on {s}; capacity={d} handshakes={d} buffers={f}", .{
+            self.config.raw.value.listen, self.slots.len, self.stages.entries.len, logging.Bytes{ .value = Config.bufferBytes(self.config.raw.value) },
         });
         var events: [256]linux.epoll_event = undefined;
         var now = try net.nowMs();
+        self.log.begin(now, &self.counts);
         var stats = now + self.config.raw.value.stats_interval_ms;
         while (true) {
             if (self.stop_deadline_ms) |deadline| {
@@ -155,12 +160,13 @@ pub const Server = struct {
                 self.listener_registered = true;
             }
             if (self.config.raw.value.stats_interval_ms != 0 and now >= stats) {
-                self.snapshot();
+                self.log.periodic(&self.counts);
                 stats = now + self.config.raw.value.stats_interval_ms;
             }
+            self.log.tick(now, &self.counts);
         }
         for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
-        self.snapshot();
+        self.log.stopped(&self.counts);
     }
 
     fn admit(self: *Server, now: u64) !void {
@@ -214,6 +220,8 @@ pub const Server = struct {
         };
         const prefix = slot.conn.stage != null;
         if (slot.timer_state == null or slot.timer_state.? != slot.conn.state or slot.timer_prefix != prefix) {
+            if (slot.timer_state == null or slot.timer_state.? != slot.conn.state)
+                self.log.message(.debug, "connection", "connection id={d} phase={s}", .{ self.pool.token(index, false), @tagName(slot.conn.state) });
             self.timers.set(index, slot.conn.deadline(self.config.raw.value));
             slot.timer_state = slot.conn.state;
             slot.timer_prefix = prefix;
@@ -241,6 +249,20 @@ pub const Server = struct {
 
     fn drop(self: *Server, index: u32) void {
         const slot = &self.slots[index];
+        if (slot.conn.state != .closed) slot.conn.close(.stopping);
+        if (self.log.enabled(.debug)) {
+            const id = self.pool.token(index, false);
+            if (slot.conn.io_failure) |detail| {
+                switch (detail.failure) {
+                    .errno => |err| self.log.message(.debug, "connection_closed", "connection id={d} closed reason=io_error side={s} operation={s} errno={d}", .{
+                        id, @tagName(detail.side), @tagName(detail.operation), @intFromEnum(err),
+                    }),
+                    .zero_write => self.log.message(.debug, "connection_closed", "connection id={d} closed reason=zero_write side={s} operation={s}", .{
+                        id, @tagName(detail.side), @tagName(detail.operation),
+                    }),
+                }
+            } else self.log.message(.debug, "connection_closed", "connection id={d} closed reason={s}", .{ id, @tagName(slot.conn.reason) });
+        }
         self.timers.set(index, null);
         // DEL before close, and generation validation before every batch event.
         for (0..2) |role| if (slot.registered[role]) {
@@ -266,10 +288,14 @@ pub const Server = struct {
                 else => return error.SignalReadFailed,
             }
             if (info.signo == @intFromEnum(linux.SIG.USR1)) {
-                self.snapshot();
+                self.log.snapshot(&self.counts);
+            } else if (info.signo == @intFromEnum(linux.SIG.USR2)) {
+                self.log.cycle(now, &self.counts);
             } else if (self.stop_deadline_ms != null) {
+                self.log.message(.warn, "stopping", "forcing shutdown; active={d}", .{self.counts.active});
                 self.stop_deadline_ms = now;
             } else {
+                self.log.message(.info, "stopping", "draining; active={d}; deadline=30s", .{self.counts.active});
                 self.stop_deadline_ms = now + 30000;
                 if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0);
                 self.listener_registered = false;
@@ -277,11 +303,6 @@ pub const Server = struct {
                 self.listener = -1;
             }
         }
-    }
-
-    fn snapshot(self: *const Server) void {
-        var bytes: [@import("counters.zig").snapshot_capacity]u8 = undefined;
-        net.print("{s}", .{self.counts.snapshot(&bytes)});
     }
 };
 

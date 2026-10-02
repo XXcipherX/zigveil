@@ -9,4 +9,5 @@ test {
     _ = @import("linux_io.zig");
     _ = @import("counters.zig");
     _ = @import("backend.zig");
+    _ = @import("log.zig");
 }

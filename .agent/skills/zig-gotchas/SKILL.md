@@ -47,6 +47,13 @@ not generic errors or a shared mutable errno slot. SO_ERROR's returned integer i
 a positive errno, unlike the negative raw syscall result. Reading SO_ERROR clears
 it; do not add probes merely to collect diagnostics on successful I/O.
 
+Runtime logging uses the single-owner Logger, not std.log's global settings or
+stderr mutex. Keep raw counters separate from log interval baselines, with wrapping
+differences for events and unchanged gauges. Validate none/error/warn/info/debug
+and text/json before any startup resolution. Keep SIGUSR2 in the signalfd mask;
+explicit snapshots and --check bypass automatic verbosity. Escape message control
+bytes and preserve fixed-buffer worst-case bounds, including max-u64 byte units.
+
 Linux accept4 may return pending per-connection network errors. Continue only
 within the accept budget; back off for fd/memory pressure and propagate fatal
 listener/policy failures. EAGAIN and EINTR do not increment accept_errors.

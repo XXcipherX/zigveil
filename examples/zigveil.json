@@ -11,5 +11,7 @@
   "hello_timeout_ms": 5000,
   "connect_timeout_ms": 5000,
   "idle_timeout_ms": 300000,
+  "log_level": "info",
+  "log_format": "text",
   "reuse_port": false
 }

@@ -28,7 +28,7 @@ the backend protocol is opaque.
 - Startup-reserved pools and fixed rings; no serving-path heap allocation.
 - Partial I/O, bounded backpressure, independent EOF/FIN in both directions.
 - Absolute hello/connect/prefix deadlines and optional relay idle timeout.
-- JSON counter snapshots; no packet logs or management listener.
+- Readable live logs, configurable levels and optional JSON counter snapshots.
 - Standard library only; no third-party Zig dependencies or libc requirement.
 
 There is no HTTP handling, TLS termination, DNS refresh while serving, routing reload, regex,
@@ -122,7 +122,9 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `hello_timeout_ms` | `5000` | Absolute pre-routing deadline; range 250..60000 |
 | `connect_timeout_ms` | `5000` | Separate absolute connect and prefix-send deadlines |
 | `idle_timeout_ms` | `300000` | Successful-I/O idle deadline; `0` disables it |
-| `stats_interval_ms` | `30000` | Counter interval; `0` disables periodic snapshots |
+| `stats_interval_ms` | `30000` | Activity summary interval; `0` disables summaries, while live warnings remain enabled |
+| `log_level` | `"info"` | `error`, `warn`, `info`, `debug` or `none` |
+| `log_format` | `"text"` | Readable `text` or machine-readable `json` |
 | `reuse_port` | `false` | Allow independently launched processes to share the listener |
 
 A malformed or over-limit ClientHello is closed even when fallback is configured.
@@ -236,6 +238,66 @@ processes with `reuse_port: true` and identical route tables, optionally pinning
 to a CPU. Limits and counters are **per process**; they add across processes. There
 is no supervisor or dataplane worker-thread manager inside Zigveil.
 
+## Logging
+
+The default is readable text at `info`, written live to stderr with UTC timestamps
+and aligned severity labels. Set these optional JSON keys:
+
+```json
+"log_level": "info",
+"log_format": "text",
+"stats_interval_ms": 30000
+```
+
+| Level | Output |
+| --- | --- |
+| `error` | Fatal service errors, unexpected socket errno and zero-byte nonempty writes |
+| `warn` | Errors plus connection failures, deadlines, rejected admissions, accept failures, malformed hellos and other network failures |
+| `info` | Warnings/errors, startup/shutdown and compact activity summaries |
+| `debug` | Info plus connection phase/close events with an ID, reason and exact socket side/operation/errno on fatal I/O |
+| `none` | No automatic daemon output |
+
+Periodic text summaries show the current active count and changes since the previous
+summary. Byte volumes use B/KiB/MiB/GiB; zero event fields are omitted. An idle process
+does not repeat empty summaries. For example:
+
+```text
+2026-10-02T12:00:00Z INFO  activity; active=0 accepted=330 routed=329 closed=330 sent=187.4MiB received=724.1MiB connection_resets=66 broken_pipes=6 unknown_sni=1
+2026-10-02T12:00:01Z WARN  failures connect_failures=2
+```
+
+New warning/error counts are combined into at most one message per severity per
+second, independently of the summary interval. Shutdown flushes pending counts.
+Resets and broken pipes appear in info summaries and debug close details; they
+still close the affected stream and remain in `io_errors`. Their log severity does
+not establish which application caused them. Ordinary FIN has no warning. Debug
+logs contain lifecycle metadata, never payloads, ClientHello contents or client IPs.
+
+`SIGUSR1` explicitly requests cumulative totals. Text groups related counters and
+omits zeros; `json` emits the complete original `event: stats` object, including zero
+fields and exact byte counts. In JSON mode, enabled periodic/final stats also retain
+that full schema; other events have `time`, `level`, `event` and `message` fields.
+
+`SIGUSR2` changes the running level in a cycle:
+`info → debug → none → error → warn → info`. It prints one confirmation even when
+entering `none`. A restart restores the config value; re-enabling logs does not
+replay previously muted errors. Level changes flush pending output that is enabled
+at the old level before switching. Explicit snapshots and CLI inspection commands
+remain available at `none`. Other config changes require a restart.
+
+```sh
+# Native service: follow output; use the daemon PID for diagnostic signals.
+journalctl -u zigveil -f
+kill -USR1 "$PID"
+kill -USR2 "$PID"
+
+# Supplied Compose deployment.
+cd /opt/zigveil
+sudo docker compose --env-file .env -f compose.yml logs --follow
+sudo docker kill --signal=USR1 zigveil
+sudo docker kill --signal=USR2 zigveil
+```
+
 ## ClientHello and security limits
 
 The allocation-free parser accepts TLS 1.2/1.3 ClientHello across TCP fragments and
@@ -260,7 +322,8 @@ deadlines are tracked in a bounded indexed queue, with event-batch scheduling de
 Keepalive and custom socket-buffer tuning are left to OS defaults; `TCP_NODELAY`
 is enabled to avoid holding small forwarding writes.
 
-`SIGUSR1` emits one JSON counter snapshot to stderr. Counters include accepted,
+Logs go to stderr. See [Logging](#logging) for levels and explicit snapshots.
+Counters include accepted,
 active, routed, unknown/missing SNI, invalid hello, connect failures, forwarded bytes,
 timeouts, I/O errors, rejected admissions and closes. Forwarded byte counters count
 successful sends, including the complete staged wire prefix.
@@ -292,7 +355,7 @@ not all the fields together. Connect and accept failures remain separate.
 `last_other_io_errno` is a gauge holding the exact most recent errno counted in
 `other_io_errors`, including values unknown to Zig's enum; zero means none observed.
 It is excluded from counter sums. The snapshot is bounded and allocation-free.
-No per-connection logs are added. Clean FIN and EAGAIN/EINTR do not count as errors.
+Connection lifecycle details appear only at `debug`. Clean FIN and EAGAIN/EINTR do not count as errors.
 Reset and broken pipe are observed socket outcomes that remain fatal; the counters
 do not declare them either proxy defects or harmless application behavior.
 

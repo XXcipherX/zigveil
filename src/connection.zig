@@ -12,12 +12,14 @@ pub const State = enum { hello, connecting, relaying, closed };
 pub const CloseReason = enum { complete, invalid_hello, no_route, connect_failed, io_error, timeout, stopping };
 pub const Direction = struct { buffer: Buffer, eof: bool = false, fin: bool = false };
 pub const Interest = struct { read: bool = false, write: bool = false };
+pub const IoFailure = struct { side: outcome.Side, operation: outcome.Operation, failure: outcome.Failure };
 
 pub const Connection = struct {
     client: i32,
     backend: i32 = -1,
     state: State = .hello,
     reason: CloseReason = .complete,
+    io_failure: ?IoFailure = null,
     stage: ?[]u8,
     stage_len: usize = 0,
     stage_sent: usize = 0,
@@ -98,6 +100,7 @@ pub const Connection = struct {
     fn failIo(self: *Connection, side: outcome.Side, operation: outcome.Operation, failure: outcome.Failure, counts: *Counters) void {
         if (self.state == .closed) return;
         counts.recordIo(side, operation, failure);
+        self.io_failure = .{ .side = side, .operation = operation, .failure = failure };
         self.close(.io_error);
     }
 

@@ -10,11 +10,19 @@ Validate configuration and descriptor budget first:
 zigveil --check /etc/zigveil/config.json
 systemctl status zigveil --no-pager
 journalctl -u zigveil -n 100 --no-pager
+journalctl -u zigveil -f
 kill -USR1 "$PID"
+kill -USR2 "$PID"
 ```
 
-Use an explicit PID for each process. SIGUSR1 writes one JSON snapshot to stderr;
-periodic snapshots are optional. No packet logging or admin listener is available.
+Use an explicit PID for each process. Default info/text logs show lifecycle events,
+compact interval activity and live warning/error groups. Idle/zero fields are quiet.
+SIGUSR1 requests cumulative grouped totals, or complete JSON with log_format json,
+even at log_level none. SIGUSR2 cycles info/debug/none/error/warn and confirms the
+change; restart restores config verbosity. Debug shows connection IDs, phase/close
+reasons and exact fatal socket metadata, without payloads or client IPs. Changing
+verbosity does not reset counters or replay previously muted failures.
+No packet logging or admin listener is available.
 
 Hostname backends resolve once during startup and `--check`, using the environment's
 hosts/resolver files. Resolution errors prevent listening; a DNS change requires a
@@ -39,7 +47,9 @@ operation and one cause, so sum each dimension separately against `io_errors`.
 `last_other_io_errno` records only the most recent unclassified numeric errno and
 must not be summed. `socket_timeouts` (ETIMEDOUT) differ from proxy deadlines.
 Clean FIN and retry outcomes remain uncounted; ECONNRESET/EPIPE stay fatal observed
-socket outcomes. Use a controlled reproduction and workload evidence to decide
+socket outcomes. They appear in info summaries/debug closes instead of one warning
+per teardown. Other live failures are grouped at most once per severity per second,
+independent of stats_interval_ms. Use a controlled reproduction and workload evidence to decide
 whether these outcomes are expected; the snapshot cannot reconstruct old runs.
 
 `FatalListenerError` exits the process instead of repeatedly resuming an invalid

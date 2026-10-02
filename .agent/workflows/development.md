@@ -30,6 +30,9 @@ sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
 Docker/deployment changes additionally require shell syntax/lint, native image
 builds, `python3 test/docker_smoke.py --image IMAGE`, and the Compose installer E2E
 on a disposable systemd host. The normal CI runs these checks on amd64/arm64.
+Logging changes verify live levels, SIGUSR1/USR2, idle suppression, grouped rate
+limits, bounded escaping/units and unchanged JSON counters through actual sockets.
+Keep daemon readiness independent of log verbosity.
 
 5. Review the full diff for unchecked arithmetic, stale slices, prefix offsets,
    backpressure masks, FIN ordering, fd/token reuse, deadline progress and teardown.

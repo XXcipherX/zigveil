@@ -133,17 +133,61 @@ class Daemon:
         self.config = {"listen": f"127.0.0.1:{self.port}",
                        "routes": [{"sni": "example.com", "backend": backend}],
                        "max_connections": 32, "max_handshakes": 16,
-                       "relay_buffer_bytes": 4096, "stats_interval_ms": 0}
+                       "relay_buffer_bytes": 4096, "stats_interval_ms": 0,
+                       "log_format": "json"}
         self.config.update(overrides)
+        self.port = int(self.config["listen"].rsplit(":", 1)[1])
+        if self.config.get("log_format") is None:
+            self.config.pop("log_format", None)
         path = Path(self.directory.name) / "config.json"
         path.write_text(json.dumps(self.config), encoding="utf-8")
         self.log_path = Path(self.directory.name) / "stderr.log"
         self.log_file = self.log_path.open("wb")
         self.process = subprocess.Popen([*launch_prefix, BINARY, str(path)], stderr=self.log_file)
-        self.wait_for(lambda: "listening on" in self.logs())
+        # Read kernel listener state without opening a probe connection or relying
+        # on INFO output; warn/error/none must start silently too.
+        try:
+            self.wait_for(self.listening)
+        except BaseException:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+            self.log_file.close()
+            self.directory.cleanup()
+            raise
+
+    def listening(self):
+        inodes = set()
+        try:
+            for fd in Path(f"/proc/{self.process.pid}/fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except FileNotFoundError:
+                    continue
+                if target.startswith("socket:["):
+                    inodes.add(target[8:-1])
+            for table in ("tcp", "tcp6"):
+                for line in Path(f"/proc/{self.process.pid}/net/{table}").read_text().splitlines()[1:]:
+                    fields = line.split()
+                    if fields[3] == "0A" and int(fields[1].split(":")[1], 16) == self.port and fields[9] in inodes:
+                        return True
+        except FileNotFoundError:
+            pass
+        return False
 
     def logs(self):
         return self.log_path.read_text(encoding="utf-8")
+
+    def events(self):
+        # A concurrent regular-file read can see the tail of an unfinished
+        # write. Only newline-terminated records are ready for JSON parsing;
+        # malformed complete records must still fail the test.
+        return [json.loads(line) for line in self.logs().splitlines(keepends=True)
+                if line.startswith("{") and line.endswith("\n")]
 
     def wait_for(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
@@ -161,10 +205,12 @@ class Daemon:
         return sock
 
     def snapshot(self):
-        old = len(self.logs().splitlines())
+        def snapshots():
+            return [event for event in self.events() if event.get("event") == "stats"]
+        old = len(snapshots())
         self.process.send_signal(signal.SIGUSR1)
-        self.wait_for(lambda: len(self.logs().splitlines()) > old)
-        return [json.loads(line) for line in self.logs().splitlines() if line.startswith("{")][-1]
+        self.wait_for(lambda: len(snapshots()) > old)
+        return snapshots()[-1]
 
     @contextlib.contextmanager
     def paused(self):
@@ -422,6 +468,107 @@ class Integration(unittest.TestCase):
             proxy.wait_for(lambda: proxy.snapshot()["active"] == 0)
             self.assertEqual(baseline, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
             self.assert_io_dimensions(proxy.snapshot())
+
+    def test_text_logs_show_compact_activity_and_explicit_totals(self):
+        with Origin() as origin, Daemon(origin.address, log_format=None, stats_interval_ms=1000) as proxy:
+            wire = hello() + bytes(range(256)) * 8
+            with proxy.connect() as client:
+                client.sendall(wire)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(wire, all_bytes(client))
+            proxy.wait_for(lambda: "accepted=1" in proxy.logs() and "received=2." in proxy.logs())
+            logs = proxy.logs()
+            self.assertRegex(logs, r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ INFO  activity; active=0 accepted=1 routed=1 closed=1 sent=2\.\dKiB received=2\.\dKiB")
+            self.assertNotIn('{"event"', logs)
+            self.assertNotIn("DEBUG", logs)
+            self.assertNotIn("io_errors=0", logs)
+            old = len(logs)
+            proxy.process.send_signal(signal.SIGUSR1)
+            proxy.wait_for(lambda: "traffic sent=" in proxy.logs()[old:])
+            self.assertIn("totals active=0 accepted=1 routed=1 closed=1", proxy.logs()[old:])
+            # Idle timer ticks must not repeat the same totals or status line.
+            stable = proxy.logs()
+            time.sleep(1.3)
+            self.assertEqual(stable, proxy.logs())
+
+    def test_live_warning_batches_and_level_filters(self):
+        backend = f"127.0.0.1:{free_port()}"
+        for level in ("info", "warn", "error", "none"):
+            with self.subTest(level=level), Daemon(backend, log_level=level, log_format="text") as proxy:
+                for _ in range(5):
+                    with proxy.connect() as client:
+                        client.sendall(hello())
+                        self.assert_closed(client)
+                if level in ("info", "warn"):
+                    proxy.wait_for(lambda: "WARN  failures connect_failures=5" in proxy.logs())
+                    stable = proxy.logs()
+                    time.sleep(1.1)
+                    self.assertEqual(stable, proxy.logs())
+                    self.assertEqual(1, stable.count("WARN  failures"))
+                else:
+                    time.sleep(1.3)
+                    self.assertEqual("", proxy.logs())
+                if level == "warn":
+                    self.assertNotIn("INFO", proxy.logs())
+
+    def test_runtime_level_cycle_and_snapshot_while_muted(self):
+        with Origin() as origin, Daemon(origin.address, log_level="none") as proxy:
+            self.assertEqual("", proxy.logs())
+            counts = proxy.snapshot()  # An explicit diagnostic bypasses none.
+            self.assertEqual(0, counts["accepted"])
+            for level in ("error", "warn", "info", "debug", "none"):
+                proxy.process.send_signal(signal.SIGUSR2)
+                proxy.wait_for(lambda: any(event.get("event") == "log_level" and
+                                          event.get("message") == f"log level changed to {level}"
+                                          for event in proxy.events()))
+            events = proxy.events()
+            self.assertEqual(["error", "warn", "info", "debug", "none"],
+                             [event["message"].rsplit(" ", 1)[-1] for event in events if event["event"] == "log_level"])
+            muted = proxy.logs()
+            with proxy.connect() as client:
+                wire = hello()
+                client.sendall(wire)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(wire, all_bytes(client))
+            time.sleep(0.3)
+            self.assertEqual(muted, proxy.logs())
+            self.assertEqual(1, proxy.snapshot()["accepted"])
+            proxy.process.send_signal(signal.SIGTERM)
+            proxy.process.wait(timeout=5)
+            self.assertNotIn('"event":"stopped"', proxy.logs())
+
+    def test_debug_reset_details_do_not_change_accounting_or_log_payload(self):
+        with Origin() as origin, Daemon(origin.address, log_level="debug") as proxy:
+            wire = hello() + b"PRIVATE-PAYLOAD-MUST-NOT-APPEAR-IN-LOGS"
+            with proxy.connect() as client:
+                client.sendall(wire)
+                self.assertEqual(wire, exact(client, len(wire)))
+                with proxy.paused():
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    client.close()
+            proxy.wait_for(lambda: any(event.get("event") == "connection_closed" for event in proxy.events()))
+            events = proxy.events()
+            closed = [event for event in events if event["event"] == "connection_closed"]
+            self.assertEqual(1, len(closed))
+            self.assertEqual("debug", closed[0]["level"])
+            self.assertIn("side=client operation=socket_error errno=104", closed[0]["message"])
+            self.assertNotIn("PRIVATE-PAYLOAD", proxy.logs())
+            self.assertNotIn('"level":"warn"', proxy.logs())
+            counts = proxy.snapshot()
+            self.assert_io_dimensions(counts, 1)
+            self.assertEqual(1, counts["connection_resets"])
+
+    def test_invalid_log_settings_fail_before_listening(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            base = {"listen": f"127.0.0.1:{free_port()}", "routes": [], "fallback": "127.0.0.1:9443"}
+            for key, value in (("log_level", "verbose"), ("log_format", "pretty")):
+                with self.subTest(key=key):
+                    path.write_text(json.dumps({**base, key: value}), encoding="utf-8")
+                    result = subprocess.run([BINARY, str(path)], capture_output=True, timeout=5)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual(1, result.stderr.count(b"invalid config"))
+                    self.assertNotIn(b"listening on", result.stderr)
 
     def test_idle_deadline_slides_with_activity_and_can_be_disabled(self):
         with Origin() as origin:

@@ -458,6 +458,10 @@ test "read errno classes and exact unknown errno traverse the production engine"
         rig.drive(&config, 5);
         try std.testing.expectEqual(engine.CloseReason.io_error, rig.conn.reason);
         try expectIoEvent(rig.counts, if (backend) "backend_read_errors" else "client_read_errors", case.cause);
+        const detail = rig.conn.io_failure.?;
+        try std.testing.expectEqual(if (backend) outcome.Side.backend else outcome.Side.client, detail.side);
+        try std.testing.expectEqual(outcome.Operation.read, detail.operation);
+        try std.testing.expectEqual(case.err, detail.failure.errno);
         try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, case.cause, "other_io_errors")) @intFromEnum(case.err) else 0), rig.counts.last_other_io_errno);
     };
 }

@@ -66,6 +66,15 @@ aggregate separately; `last_other_io_errno` is a gauge, not a third event count.
 Preserve FIN/reset semantics and classify only on failure. Stats retain a fixed
 buffer with a compile-time worst-case bound.
 
+`log.zig` is owned by main and borrowed by Server. Levels/formats come from config;
+SIGUSR2 changes only runtime verbosity in the serving loop. Periodic text activity
+uses interval deltas; warning/error groups use independent one-second deltas.
+Idle intervals and zero event fields stay quiet. JSON stats retain every counter.
+SIGUSR1 explicitly requests totals even at none. Debug lifecycle metadata is emitted
+only at phase transitions and close, never per packet. A fatal connection result
+is retained by value for that close record; it does not add successful-I/O work.
+All formatting is bounded and occurs after filtering; stderr writes may block.
+
 ## Resource and time model
 
 Buffer capacity = `connections × 2 × ring_bytes + handshakes × 65536`.

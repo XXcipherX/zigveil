@@ -1,6 +1,7 @@
 const std = @import("std");
 const Name = @import("name.zig").Name;
 const backend_mod = @import("backend.zig");
+const logging = @import("log.zig");
 pub const Address = std.Io.net.IpAddress;
 pub const hello_bytes = @import("client_hello.zig").max_wire_bytes;
 
@@ -15,6 +16,8 @@ pub const Raw = struct {
     connect_timeout_ms: u32 = 5000,
     idle_timeout_ms: u32 = 300000,
     stats_interval_ms: u32 = 30000,
+    log_level: logging.Level = .info,
+    log_format: logging.Format = .text,
     reuse_port: bool = false,
 };
 
