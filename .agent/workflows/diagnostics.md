@@ -19,7 +19,7 @@ Use an explicit PID for each process. Default info/text logs show lifecycle even
 compact interval activity and live warning/error groups. Idle/zero fields are quiet.
 SIGUSR1 requests cumulative grouped totals, or complete JSON with log_format json,
 even at log_level none. SIGUSR2 cycles info/debug/none/error/warn and confirms the
-change; restart restores config verbosity. Debug shows connection IDs, phase/close
+change; restart restores config verbosity. debug shows connection IDs, phase/close
 reasons and exact fatal socket metadata, without payloads or client IPs. Changing
 verbosity does not reset counters or replay previously muted failures.
 No packet logging or admin listener is available.

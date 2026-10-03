@@ -1,4 +1,4 @@
-//! Zig 0.16 Linux syscall boundary; no libc and no async runtime dependency.
+//! Zig 0.17 Linux syscall boundary; no libc and no async runtime dependency.
 const std = @import("std");
 const linux = std.os.linux;
 const Address = @import("config.zig").Address;
@@ -174,7 +174,8 @@ const SockAddress = struct {
             .ip4 => |a| {
                 const addr: linux.sockaddr.in = .{
                     .port = std.mem.nativeToBig(u16, a.port),
-                    .addr = @bitCast(a.bytes),
+                    // sockaddr stores the address in network-order memory bytes.
+                    .addr = std.mem.bytesToValue(u32, &a.bytes),
                 };
                 result.len = @sizeOf(@TypeOf(addr));
                 @memcpy(std.mem.asBytes(&result.storage)[0..result.len], std.mem.asBytes(&addr));
@@ -214,7 +215,7 @@ fn socketError(fd: i32, metrics: *@import("metrics.zig").Metrics) Result(void) {
         if (err == .INTR) continue;
         if (err != .SUCCESS) return .{ .err = err };
         // SO_ERROR is a positive errno (or zero), not a syscall return value.
-        return statusResult(@enumFromInt(@as(u16, @intCast(value))));
+        return statusResult(@fromBackingInt(@as(u16, @intCast(value))));
     }
 }
 
@@ -273,7 +274,7 @@ pub fn checkFdLimit(max_connections: u32) !void {
 
 pub fn print(comptime format: []const u8, args: anytype) void {
     var storage: [4096]u8 = undefined;
-    const bytes = std.fmt.bufPrint(&storage, format, args) catch return;
+    const bytes = std.mem.print(&storage, format, args) catch return;
     printBytes(bytes);
 }
 
@@ -336,7 +337,7 @@ test "production accept result distinguishes retry, network, pressure and fatal 
         .{ .errno = .IO, .failure = error.FatalListenerError },
     };
     for (cases) |case| {
-        const rc: usize = @bitCast(-@as(isize, @intFromEnum(case.errno)));
+        const rc: usize = @bitCast(-@as(isize, @backingInt(case.errno)));
         try std.testing.expectError(case.failure, acceptResult(rc));
     }
 }
@@ -355,8 +356,8 @@ test "Linux shutdown boundary reports ENOTCONN and keeps invalid descriptors fat
 
 test "transfer decoder preserves exact known, retry and unknown Linux errno" {
     try std.testing.expectEqual(@as(usize, 123), transferResult(123).ok);
-    for ([_]linux.E{ .AGAIN, .INTR, .CONNRESET, .PIPE, .NOTCONN, .CONNABORTED, .TIMEDOUT, .NETRESET, .NETDOWN, .NETUNREACH, .HOSTUNREACH, .BADF, @enumFromInt(4090) }) |err| {
-        const rc: usize = @bitCast(-@as(isize, @intFromEnum(err)));
+    for ([_]linux.E{ .AGAIN, .INTR, .CONNRESET, .PIPE, .NOTCONN, .CONNABORTED, .TIMEDOUT, .NETRESET, .NETDOWN, .NETUNREACH, .HOSTUNREACH, .BADF, @fromBackingInt(@as(u16, 4090)) }) |err| {
+        const rc: usize = @bitCast(-@as(isize, @backingInt(err)));
         try std.testing.expectEqual(err, transferResult(rc).err);
         try std.testing.expectEqual(err, statusResult(err).err);
     }

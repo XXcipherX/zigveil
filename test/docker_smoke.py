@@ -24,7 +24,8 @@ def smoke(image):
     common = ["docker", "run", "--rm", "--read-only", "--cap-drop", "ALL",
               "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges:true",
               "--ulimit", "nofile=65536:65536"]
-    assert "zigveil 0.1.0" in command(*common, image, "--version").stderr
+    version = command(*common, image, "--version").stderr
+    assert "zigveil 0.1.0 (Zig 0.17.0," in version, version
     missing = command(*common, image, check=False)
     assert missing.returncode and "mount a readable config.json" in missing.stderr, missing
     with tempfile.TemporaryDirectory() as directory, Origin() as origin:

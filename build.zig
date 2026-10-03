@@ -2,7 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16 or builtin.zig_version.patch != 0) @panic("Zigveil requires Zig 0.16.0");
+    const version = builtin.zig_version;
+    if (version.major != 0 or version.minor != 17 or version.patch != 0 or version.pre != null or version.build != null) @panic("Zigveil requires exactly Zig 0.17.0");
     const target = b.standardTargetOptions(.{});
     if (target.result.os.tag != .linux) @panic("Zigveil supports Linux; use -Dtarget=x86_64-linux or -Dtarget=aarch64-linux");
     const optimize = b.standardOptimizeOption(.{});

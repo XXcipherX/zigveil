@@ -6,13 +6,13 @@ Zigveil forwards long-lived opaque TCP streams. Routing happens once; bulk copyi
 kernel TCP work, syscall cost and queue scheduling dominate sustained traffic.
 The proxy preserves the complete TCP byte sequence and holds no TLS secrets.
 
-The implementation uses Zig 0.16.0 standard library types, pure parsers and direct
+The implementation uses Zig 0.17.0 standard library types, pure parsers and direct
 Linux syscalls. `std.process.Init.Minimal` passes arguments without initializing
 `std.Io.Threaded` automatically. `std.Io.net.IpAddress.parseLiteral` supplies numeric
 address parsing. Hostname backends use an explicitly scoped startup resolver that
 is destroyed before the raw-syscall serving loop. Version-specific signatures were checked
-against the 0.16.0 standard library, rather than pre-0.16 `std.net` examples.
-See the [official release notes](https://ziglang.org/download/0.16.0/release-notes.html).
+against the 0.17.0 standard library.
+See the [official release notes](https://ziglang.org/download/0.17.0/release-notes.html).
 
 ## Decision: level-triggered epoll
 
@@ -120,7 +120,7 @@ The listener remains numeric. `Config.parseWithResolver` substitutes only startu
 lookup for unit tests; the production route/relay types still contain numeric
 `IpAddress` values.
 
-Zig 0.16.0 `HostName.lookup` uses `/etc/hosts` and the Linux resolver configuration.
+Zig 0.17.0 `HostName.lookup` uses `/etc/hosts` and the Linux resolver configuration.
 Each configured hostname resolves once before bind, including `--check`. Lookup
 errors prevent startup. The first IPv4 answer is selected, otherwise the first IPv6;
 mapped IPv4 counts as IPv4. The selected address is checked for unicast and self
@@ -335,7 +335,7 @@ compile-time maximum-width bounds; JSON/text escaping prevents newlines and cont
 bytes from forging events or terminal controls. The line bound covers six-byte JSON
 escapes for every message byte. Byte-unit arithmetic remains safe at maximum u64.
 Writes retry EINTR and partial writes, without growing storage; a blocked stderr can
-still stall the single serving loop. Debug verbosity is intended for diagnosis.
+still stall the single serving loop. debug verbosity is intended for diagnosis.
 
 Compose installer readiness checks an owned LISTEN socket through the container's
 host PID, rather than requiring a startup log at info. Explicit --check diagnostics
@@ -357,7 +357,7 @@ window, records boundary skew and tail drain separately, and verifies reclamatio
 Both baseline and candidate use the same harness on the same runner, alternating
 order across repetitions. Optional perf counters are gated at these boundaries;
 capability failures remain explicit missing measurements. Metrics builds and perf
-recording are diagnostic variants, with ordinary ReleaseFast results retained
+recording are diagnostic variants, with ordinary fast results retained
 separately for performance comparisons.
 
 The selected splice path has fixed process-owned kernel queues and bounded ring
@@ -391,7 +391,7 @@ Each linked run retains raw trials, configuration, actor CPU and paired statisti
 | Existing epoll/splice ownership | [Kernel profile](https://github.com/XXcipherX/zigveil/actions/runs/37018679423) places most sampled cost in Linux TCP/splice work. io_uring/send_zc have not been implemented or compared; they need a separate bottleneck/ownership case. |
 
 The production reference `28cdf224` was confirmed in 30-second × 5-repetition
-ordinary ReleaseFast runs for [bulk 1/10](https://github.com/XXcipherX/zigveil/actions/runs/37018663898),
+ordinary Zig 0.16.0 `ReleaseFast` runs for [bulk 1/10](https://github.com/XXcipherX/zigveil/actions/runs/37018663898),
 [bulk 100/1000](https://github.com/XXcipherX/zigveil/actions/runs/37018667812),
 [latency](https://github.com/XXcipherX/zigveil/actions/runs/37018671466), and
 [loaded latency/churn](https://github.com/XXcipherX/zigveil/actions/runs/37018675295).

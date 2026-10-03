@@ -172,9 +172,9 @@ test "reject unknown keys, duplicate routes, invalid endpoints and resource limi
 fn checkEndpointConfig(listen: []const u8, backend: []const u8, fallback: bool, rejection: ?anyerror) !void {
     var storage: [512]u8 = undefined;
     const json = if (fallback)
-        try std.fmt.bufPrint(&storage, "{{\"listen\":\"{s}\",\"routes\":[],\"fallback\":\"{s}\"}}", .{ listen, backend })
+        try std.mem.print(&storage, "{{\"listen\":\"{s}\",\"routes\":[],\"fallback\":\"{s}\"}}", .{ listen, backend })
     else
-        try std.fmt.bufPrint(&storage, "{{\"listen\":\"{s}\",\"routes\":[{{\"sni\":\"example.com\",\"backend\":\"{s}\"}}]}}", .{ listen, backend });
+        try std.mem.print(&storage, "{{\"listen\":\"{s}\",\"routes\":[{{\"sni\":\"example.com\",\"backend\":\"{s}\"}}]}}", .{ listen, backend });
     if (Config.parse(std.testing.allocator, json)) |value| {
         var config = value;
         defer config.deinit(std.testing.allocator);
@@ -287,9 +287,9 @@ test "resolved self targets and non-unicast targets fail for routes and fallback
         var storage: [512]u8 = undefined;
         const listen = if (std.mem.startsWith(u8, target, "[::1]")) "[::]:443" else "0.0.0.0:443";
         const input = if (fallback)
-            try std.fmt.bufPrint(&storage, "{{\"listen\":\"{s}\",\"routes\":[],\"fallback\":\"backend.example.com:443\"}}", .{listen})
+            try std.mem.print(&storage, "{{\"listen\":\"{s}\",\"routes\":[],\"fallback\":\"backend.example.com:443\"}}", .{listen})
         else
-            try std.fmt.bufPrint(&storage, "{{\"listen\":\"{s}\",\"routes\":[{{\"sni\":\"example.com\",\"backend\":\"backend.example.com:443\"}}]}}", .{listen});
+            try std.mem.print(&storage, "{{\"listen\":\"{s}\",\"routes\":[{{\"sni\":\"example.com\",\"backend\":\"backend.example.com:443\"}}]}}", .{listen});
         if (Config.parseWithResolver(std.testing.allocator, input, &resolver)) |value| {
             var unexpected = value;
             unexpected.deinit(std.testing.allocator);

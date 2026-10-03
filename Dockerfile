@@ -1,19 +1,19 @@
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 FROM debian:trixie-slim AS builder
 ARG ZIG_VERSION
 ARG TARGETARCH
-ARG PRODUCTION_MODE=ReleaseFast
+ARG PRODUCTION_MODE=fast
 ARG ZIGVEIL_CPU=baseline
 
 RUN set -eu; \
-    test "$ZIG_VERSION" = 0.16.0; \
+    test "$ZIG_VERSION" = 0.17.0; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
     rm -rf /var/lib/apt/lists/*; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
-      amd64) zig_arch=x86_64; sha=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;; \
-      arm64) zig_arch=aarch64; sha=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17 ;; \
+      amd64) zig_arch=x86_64; sha=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;; \
+      arm64) zig_arch=aarch64; sha=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
@@ -21,13 +21,15 @@ RUN set -eu; \
     echo "$sha  /tmp/zig.tar.xz" | sha256sum -c -; \
     mkdir /opt/zig; \
     tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1; \
+    test "$(/opt/zig/zig version)" = "$ZIG_VERSION"; \
+    /opt/zig/zig version; \
     rm /tmp/zig.tar.xz
 
 WORKDIR /build
 COPY build.zig ./
 COPY src ./src
 RUN set -eu; \
-    case "$PRODUCTION_MODE" in ReleaseFast|ReleaseSafe) ;; *) exit 1 ;; esac; \
+    case "$PRODUCTION_MODE" in fast|safe) ;; *) exit 1 ;; esac; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
       amd64) target=x86_64-linux ;; \
       arm64) target=aarch64-linux ;; \

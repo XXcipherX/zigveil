@@ -4,13 +4,13 @@ description: Image publication, configuration preflight and native/Compose deplo
 
 # Deployment workflow
 
-Use a verified ReleaseFast or ReleaseSafe binary/image from a known commit.
+Use a verified fast or safe binary/image from a known commit.
 Deployment runs only on an authorized host. The Compose installer can install
 Docker on that host; creating or reviewing the script does not authorize running it.
 
 ## Image publication and Compose
 
-`Dockerfile` builds native Linux amd64/arm64 images with verified Zig 0.16.0 archives.
+`Dockerfile` builds native Linux amd64/arm64 images with verified Zig 0.17.0 archives.
 The publish workflow builds by digest on native Ubuntu 26.04 runners, verifies
 runtime behavior and runnable platforms, then publishes the selected/latest/SHA
 tags. Optional amd64-v3 images require compatible CPU flags. Use current action

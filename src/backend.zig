@@ -13,7 +13,7 @@ pub const Endpoint = union(enum) {
             return .{ .address = addr };
         } else |_| {}
 
-        const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidBackendAddress;
+        const colon = std.mem.findScalar(u8, text, ':') orelse return error.InvalidBackendAddress;
         const host = text[0..colon];
         const port_text = text[colon + 1 ..];
         if (host.len == 0 or port_text.len == 0) return error.InvalidBackendAddress;
@@ -110,8 +110,13 @@ test "backend literals and hostnames require a port and reject URLs" {
     for ([_][]const u8{ "", "example.com", "example.com:", "example.com:0", "example.com:65536", "example.com:+443", "example.com:443/", "https://example.com:443", "tcp://example.com:443", "user@example.com:443", "bad_name.example:443", " example.com:443", ".example.com:443", "example..com:443", "пример.example:443", "127.0.0.999:443", "127.0.0.1:0", "[::1]:0", "::1:443", "[example.com]:443" }) |text| {
         try std.testing.expectError(error.InvalidBackendAddress, Endpoint.parse(text));
     }
-    try std.testing.expectError(error.InvalidBackendAddress, Endpoint.parse("a" ** 64 ++ ".example:443"));
-    try std.testing.expectError(error.InvalidBackendAddress, Endpoint.parse("a." ** 127 ++ "a:443"));
+    var long_label_endpoint: [76]u8 = @splat('a');
+    @memcpy(long_label_endpoint[64..], ".example:443");
+    try std.testing.expectError(error.InvalidBackendAddress, Endpoint.parse(&long_label_endpoint));
+    var long_endpoint: [259]u8 = @splat('a');
+    for (0..127) |i| long_endpoint[i * 2 + 1] = '.';
+    @memcpy(long_endpoint[255..], ":443");
+    try std.testing.expectError(error.InvalidBackendAddress, Endpoint.parse(&long_endpoint));
 }
 
 test "resolved selection prefers the first IPv4 otherwise the first IPv6" {

@@ -306,7 +306,7 @@ pub const Server = struct {
             if (slot.conn.io_failure) |detail| {
                 switch (detail.failure) {
                     .errno => |err| self.log.message(.debug, "connection_closed", "connection id={d} closed reason=io_error side={s} operation={s} errno={d}", .{
-                        id, @tagName(detail.side), @tagName(detail.operation), @intFromEnum(err),
+                        id, @tagName(detail.side), @tagName(detail.operation), @backingInt(err),
                     }),
                     .zero_write => self.log.message(.debug, "connection_closed", "connection id={d} closed reason=zero_write side={s} operation={s}", .{
                         id, @tagName(detail.side), @tagName(detail.operation),
@@ -341,13 +341,13 @@ pub const Server = struct {
                 .SUCCESS => if (rc != bytes.len) return error.SignalReadFailed,
                 else => return error.SignalReadFailed,
             }
-            if (info.signo == @intFromEnum(linux.SIG.USR1)) {
+            if (info.signo == @backingInt(linux.SIG.USR1)) {
                 self.log.snapshot(&self.counts);
                 if (metrics.enabled) {
                     var storage: [metrics.capacity]u8 = undefined;
                     net.printBytes(self.io.metrics.snapshot(&storage));
                 }
-            } else if (info.signo == @intFromEnum(linux.SIG.USR2)) {
+            } else if (info.signo == @backingInt(linux.SIG.USR2)) {
                 self.log.cycle(now, &self.counts);
             } else if (self.stop_deadline_ms != null) {
                 self.log.message(.warn, "stopping", "forcing shutdown; active={d}", .{self.counts.active});

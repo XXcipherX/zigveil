@@ -27,7 +27,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Lifetime | Pool exhaustion, role/generation tokens and stale events after reuse |
 | Timers | Indexed insertion/update/cancellation/reuse against an independent randomized model |
 
-`zig build fuzz -Doptimize=ReleaseSafe` runs seeded random input, structured field
+`zig build fuzz -Doptimize=safe` runs seeded random input, structured field
 mutations and maximum-size parser cases. `fuzz.check(bytes)` is a pure test entry
 point suitable for an additional coverage-guided harness. This target is a bounded
 mutation regression campaign; it is not a claim of exhaustive fuzz coverage.
@@ -61,12 +61,14 @@ race is not asserted: its existing error probe can consume reset before send.
 python3 test/integration.py --binary zig-out/bin/zigveil
 ```
 
-The CI runs builds and unit tests in Debug, ReleaseSafe and ReleaseFast, socket
-tests in Debug and ReleaseFast, parser mutations in ReleaseSafe, a smoke test of
+The CI runs builds and unit tests in debug, safe and fast, socket
+tests in debug and fast, parser mutations in safe, a smoke test of
 the benchmark workload, and focused harness regressions.
+Native Docker smoke tests cover amd64/arm64 and amd64-v3 in fast and safe.
+The amd64 fast image also runs the Compose installer/update E2E.
 `test/bench_harness.py` checks bounded unreturned echo credit, delayed drain, failed
 measurement JSON and exit status, cancellation/close cleanup, and 1000 real streams
-through ReleaseFast Zigveil with clean byte counts, FIN and I/O counters:
+through fast Zigveil with clean byte counts, FIN and I/O counters:
 
 ```sh
 ulimit -n 8192

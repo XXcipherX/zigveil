@@ -24,9 +24,9 @@ The ten inputs are duration, repeats, baseline, workloads, rings, profiling,
 processes, instrumentation, architecture and optional JSON options.
 Empty `baseline` omits that build. `instrumentation=false` omits the diagnostic
 binary. Profiling choices are `basic`, `perf-stat` and `perf-record`.
-The default baseline is the optimized production reference `28cdf224`; supply a
-different full commit when comparing another change. Match baseline/candidate
-configuration to isolate a code cleanup.
+The default baseline is the final pre-migration production revision `1e1f0f7`;
+supply a different full commit when comparing another change. Match
+baseline/candidate configuration and select its compiler with `baseline_zig`.
 
 | JSON option | Default | Purpose |
 | --- | --- | --- |
@@ -41,6 +41,7 @@ configuration to isolate a code cleanup.
 | `origin_io` | `buffered` | Native echo via its reference queue or a single shared `splice` pipe with bounded queue fallback |
 | `baseline_ring` | candidate ring | Explicit old ring for comparing default configurations |
 | `baseline_processes` | candidate process count | Paired scale-out with identical baseline/candidate code |
+| `baseline_zig` | `0.16.0` | Exact compiler for the historical baseline; `0.17.0` for a migrated revision |
 | `cpu` | `baseline` | Candidate code generation: `baseline`, `native`, or `x86_64_v3` on amd64 |
 | `relay_splice` | true | Production splice path; false provides a buffered control |
 | `baseline_splice` | baseline build default | Explicit splice build option for comparisons with a revision supporting it |
@@ -136,7 +137,7 @@ Derivatives include cycles/instructions per byte and Gbit, IPC and syscalls/GiB.
 `perf-record` adds a separate diagnostic bulk trial, excluded from speed statistics.
 Artifacts include `perf.data`, leaf hot symbols, recorded call graphs and a
 sampled kernel/user/unknown split. Sampling and syscall tracepoints can affect
-throughput. Use `basic` and ordinary ReleaseFast for final speed claims, and
+throughput. Use `basic` and ordinary fast for final speed claims, and
 matched profiling settings for diagnostic comparisons.
 
 `-Ddataplane_metrics=true` compiles plain single-owner diagnostic counters.
@@ -152,15 +153,26 @@ kernel, visible frequency/governor, NUMA, cgroup quota/cpuset/memory limits, fd
 limits, TCP/pipe sysctls, parameters and perf capabilities. Unavailable values
 are `null`. Artifacts include child logs, configurations and before/after resources.
 Actions also retains binary section/symbol sizes and `.text` hashes to check
-generated behavior when a structural cleanup changes performance unexpectedly.
+generated behavior when a compiler or structural change affects performance.
+Disassembly is retained alongside symbol sizes; an inlined parser/ring operation
+may have no separate symbol.
+
+The candidate always uses exact Zig 0.17.0 with `-Doptimize=fast`. The default
+baseline is the final pre-migration revision `1e1f0f7`, built independently with
+Zig 0.16.0 and its `ReleaseFast` spelling. This isolated historical compiler is
+used only by the benchmark baseline. For a baseline already migrated to 0.17,
+set `options={"baseline_zig":"0.17.0"}`. Metadata records
+`candidate_zig_version`, `baseline_zig_version` and each build mode; the job also
+prints and verifies both actual versions. Keep CPU, rings, splice, processes and
+workload parameters matched for a compiler comparison.
 
 ## Running on Linux
 
 Build the optional native generator/echo origin alongside the daemon:
 
 ```sh
-zig build -Doptimize=ReleaseFast -Dbench_tools=true --prefix /tmp/zigveil-candidate
-zig build -Doptimize=ReleaseFast -Ddataplane_metrics=true --prefix /tmp/zigveil-metrics
+zig build -Doptimize=fast -Dbench_tools=true --prefix /tmp/zigveil-candidate
+zig build -Doptimize=fast -Ddataplane_metrics=true --prefix /tmp/zigveil-metrics
 python3 bench/ci.py --binary /tmp/zigveil-candidate/bin/zigveil \
   --metrics-binary /tmp/zigveil-metrics/bin/zigveil \
   --native-binary /tmp/zigveil-candidate/bin/zigveil-bench \

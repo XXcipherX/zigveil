@@ -164,8 +164,8 @@ pub const Metrics = struct {
         const prefix = "{\"event\":\"dataplane\"";
         @memcpy(bytes[0..prefix.len], prefix);
         var length: usize = prefix.len;
-        inline for (@typeInfo(Counts).@"struct".fields) |field| {
-            const part = std.fmt.bufPrint(bytes[length..], ",\"" ++ field.name ++ "\":{d}", .{self.get(field.name)}) catch unreachable;
+        inline for (@typeInfo(Counts).@"struct".field_names) |field_name| {
+            const part = std.mem.print(bytes[length..], ",\"" ++ field_name ++ "\":{d}", .{self.get(field_name)}) catch unreachable;
             length += part.len;
         }
         @memcpy(bytes[length..][0..2], "}\n");
@@ -175,7 +175,7 @@ pub const Metrics = struct {
 
 comptime {
     var length: usize = 24;
-    for (@typeInfo(Counts).@"struct".fields) |field| length += field.name.len + 24;
+    for (@typeInfo(Counts).@"struct".field_names) |field_name| length += field_name.len + 24;
     if (length > capacity) @compileError("Dataplane snapshot exceeds its fixed buffer");
 }
 
@@ -187,9 +187,9 @@ test "disabled diagnostics have zero storage; enabled results preserve retries a
     var metrics: Metrics = .{};
     metrics.recvResult(17);
     metrics.recvResult(0);
-    metrics.recvResult(@bitCast(-@as(isize, @intFromEnum(linux.E.AGAIN))));
+    metrics.recvResult(@bitCast(-@as(isize, @backingInt(linux.E.AGAIN))));
     metrics.sendResult(5, 10);
-    metrics.sendResult(@bitCast(-@as(isize, @intFromEnum(linux.E.INTR))), 10);
+    metrics.sendResult(@bitCast(-@as(isize, @backingInt(linux.E.INTR))), 10);
     try std.testing.expectEqual(@as(u64, 3), metrics.get("recv_attempts"));
     try std.testing.expectEqual(@as(u64, 17), metrics.get("recv_bytes"));
     try std.testing.expectEqual(@as(u64, 1), metrics.get("recv_eof"));

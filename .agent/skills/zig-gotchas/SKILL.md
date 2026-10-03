@@ -1,6 +1,6 @@
 ---
 name: zigveil-zig-gotchas
-description: Zig 0.16.0 API and Linux syscall details relevant to this project's dataplane.
+description: Zig 0.17.0 API and Linux syscall details relevant to this project's dataplane.
 ---
 
 # Zig and Linux pitfalls
@@ -16,8 +16,15 @@ description: Zig 0.16.0 API and Linux syscall details relevant to this project's
 - `std.Build.createModule` plus `addExecutable(.{ .root_module = ... })`.
 - `std.json.parseFromSlice`: reject unknown fields; retain parsed owner through serving.
 
-Check the installed 0.16.0 standard library or the tagged official source before
+Check the installed 0.17.0 standard library or the tagged official source before
 using a new API. ArrayList and std.Io APIs differ from older Zig releases.
+Use `std.lang.Optimize` and the canonical `debug/safe/fast/small` names. The build
+requires the exact stable release; prerelease/build suffixes are rejected.
+Reflection uses `field_names`/`field_types`/`field_attrs`, with parallel iteration
+when names and types are both needed. Use `@splat` for repeated arrays,
+`@backingInt`/`@fromBackingInt` for enum backing values, `std.mem.print` for fixed
+format buffers, `std.mem.find`/`findScalar` for search and `@memmove` for overlap.
+`@fromBackingInt` needs the exact backing integer type.
 The startup resolver uses one explicit concurrent worker and destroys its
 `std.Io.Threaded` instance before Server.init. Do not set the executable's
 single_threaded compile option or move resolver operations into the relay.
@@ -27,7 +34,7 @@ single_threaded compile option or move resolver operations into the relay.
 Attacker lengths widen before arithmetic. Check `remaining >= n` before subtracting
 or slicing. A TLS record's u16 payload length is not a staging total. Total wire cap
 includes each record header. Handshake u24 lengths cannot dictate allocation.
-Do not rely on debug assertions for untrusted input validation: ReleaseFast removes
+Do not rely on debug assertions for untrusted input validation: fast removes
 safety checks. Keep all attacker checks as ordinary branches.
 
 For narrow integers, `value << 8` may itself be invalid; accumulate in a wider type
@@ -39,6 +46,10 @@ is accessed via a live pointer, and connection slices reference stable server sl
 
 Raw sockaddr ports are network byte order; IPv4 bytes must preserve their memory
 layout. IPv6 flow/scope are zero because scoped literals are unsupported.
+Zig 0.17 `@bitCast` uses logical bits, independent of byte order. Use
+`std.mem.bytesToValue` for IPv4 sockaddr memory bytes, not an array-to-integer cast.
+The remaining signed/unsigned scalar bitcasts only encode negative syscall errno
+in test fixtures. Audit generated code as well as semantics after compiler changes.
 Socket creation and accept4 include NONBLOCK and CLOEXEC atomically.
 EINTR retries I/O, not Linux close. MSG_NOSIGNAL makes EPIPE an ordinary error.
 Splice has no MSG_NOSIGNAL flag: Server scopes SIGPIPE ignore/restore while the
@@ -80,5 +91,5 @@ Initialize it in place. Fakes must return actual partial counts and typed EAGAIN
 not silently complete writes. A test must detect lost/duplicated bytes, FIN ordering,
 deadlock, or lifetime misuse rather than merely mirror an implementation branch.
 Run meaningful security checks with safety enabled and validate the production
-ReleaseFast path separately. Keep benchmark-generated numbers out of documentation
+fast path separately. Keep benchmark-generated numbers out of documentation
 until recorded with a reproducible methodology.

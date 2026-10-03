@@ -38,7 +38,7 @@ pub const Logger = struct {
     warning_due_ms: u64 = 0,
 
     pub fn enabled(self: *const Logger, level: Level) bool {
-        return level != .none and @intFromEnum(level) <= @intFromEnum(self.level);
+        return level != .none and @backingInt(level) <= @backingInt(self.level);
     }
 
     pub fn begin(self: *Logger, now: u64, counts: *const Counters) void {
@@ -54,7 +54,7 @@ pub const Logger = struct {
 
     fn forceMessage(self: *const Logger, level: Level, comptime event: []const u8, comptime fmt: []const u8, args: anytype) void {
         var body: [message_capacity]u8 = undefined;
-        const msg: []const u8 = std.fmt.bufPrint(&body, fmt, args) catch "message exceeds log limit";
+        const msg: []const u8 = std.mem.print(&body, fmt, args) catch "message exceeds log limit";
         self.emit(level, event, msg);
     }
 
@@ -150,7 +150,7 @@ const Message = struct {
     len: usize = 0,
 
     fn append(self: *Message, comptime fmt: []const u8, args: anytype) void {
-        const part = std.fmt.bufPrint(self.bytes[self.len..], fmt, args) catch unreachable;
+        const part = std.mem.print(self.bytes[self.len..], fmt, args) catch unreachable;
         self.len += part.len;
     }
 
@@ -162,17 +162,17 @@ const Message = struct {
 fn group(comptime title: []const u8, counts: Counters, comptime fields: []const []const u8) ?Message {
     comptime {
         var bound = title.len;
-        for (fields) |field| bound += field.len + 2 + 20;
+        for (fields) |field_name| bound += field_name.len + 2 + 20;
         if (bound > message_capacity - 48) @compileError("Counter group exceeds log message buffer");
     }
     var body: Message = .{};
     body.append("{s}", .{title});
     var nonzero = false;
-    inline for (fields) |field| {
-        const value = @field(counts, field);
+    inline for (fields) |field_name| {
+        const value = @field(counts, field_name);
         if (value != 0) {
             nonzero = true;
-            body.append(" " ++ field ++ "={d}", .{value});
+            body.append(" " ++ field_name ++ "={d}", .{value});
         }
     }
     return if (nonzero) body else null;
@@ -181,22 +181,22 @@ fn group(comptime title: []const u8, counts: Counters, comptime fields: []const 
 fn activity(counts: Counters) Message {
     var body: Message = .{};
     body.append("active={d}", .{counts.active});
-    inline for (.{ "accepted", "routed", "closed" }) |field| {
-        if (@field(counts, field) != 0) body.append(" " ++ field ++ "={d}", .{@field(counts, field)});
+    inline for (.{ "accepted", "routed", "closed" }) |field_name| {
+        if (@field(counts, field_name) != 0) body.append(" " ++ field_name ++ "={d}", .{@field(counts, field_name)});
     }
     if (counts.bytes_client_to_backend != 0) body.append(" sent={f}", .{Bytes{ .value = counts.bytes_client_to_backend }});
     if (counts.bytes_backend_to_client != 0) body.append(" received={f}", .{Bytes{ .value = counts.bytes_backend_to_client }});
-    inline for (.{ "connection_resets", "broken_pipes", "unknown_sni", "missing_sni" }) |field| {
-        if (@field(counts, field) != 0) body.append(" " ++ field ++ "={d}", .{@field(counts, field)});
+    inline for (.{ "connection_resets", "broken_pipes", "unknown_sni", "missing_sni" }) |field_name| {
+        if (@field(counts, field_name) != 0) body.append(" " ++ field_name ++ "={d}", .{@field(counts, field_name)});
     }
     return body;
 }
 
 fn delta(current: Counters, previous: Counters) Counters {
     var result = current;
-    inline for (@typeInfo(Counters).@"struct".fields) |field| {
-        if (comptime !std.mem.eql(u8, field.name, "active") and !std.mem.eql(u8, field.name, "last_other_io_errno")) {
-            @field(result, field.name) = @field(current, field.name) -% @field(previous, field.name);
+    inline for (@typeInfo(Counters).@"struct".field_names) |field_name| {
+        if (comptime !std.mem.eql(u8, field_name, "active") and !std.mem.eql(u8, field_name, "last_other_io_errno")) {
+            @field(result, field_name) = @field(current, field_name) -% @field(previous, field_name);
         }
     }
     return result;
@@ -223,7 +223,7 @@ fn render(format: Format, level: Level, comptime event: []const u8, body: []cons
     const month = date.calculateMonthDay();
     const time = epoch.getDaySeconds();
     var stamp: [20]u8 = undefined;
-    const timestamp = std.fmt.bufPrint(&stamp, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    const timestamp = std.mem.print(&stamp, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         date.year,              month.month.numeric(),     @as(u8, month.day_index) + 1,
         time.getHoursIntoDay(), time.getMinutesIntoHour(), time.getSecondsIntoMinute(),
     }) catch unreachable;
@@ -235,19 +235,19 @@ fn render(format: Format, level: Level, comptime event: []const u8, body: []cons
         .debug => "DEBUG",
     };
     const prefix = if (format == .text)
-        std.fmt.bufPrint(out, "{s} {s: <5} ", .{ timestamp, label }) catch unreachable
+        std.mem.print(out, "{s} {s: <5} ", .{ timestamp, label }) catch unreachable
     else
-        std.fmt.bufPrint(out, "{{\"time\":\"{s}\",\"level\":\"{s}\",\"event\":\"{s}\",\"message\":\"", .{ timestamp, @tagName(level), event }) catch unreachable;
+        std.mem.print(out, "{{\"time\":\"{s}\",\"level\":\"{s}\",\"event\":\"{s}\",\"message\":\"", .{ timestamp, @tagName(level), event }) catch unreachable;
     var len = prefix.len;
     const hex = "0123456789abcdef";
     for (body) |byte| {
         if (byte < 32 or byte == 127 or (format == .json and (byte == '"' or byte == '\\'))) {
             const escaped = if (format == .json and (byte == '"' or byte == '\\'))
-                std.fmt.bufPrint(out[len..], "\\{c}", .{byte}) catch unreachable
+                std.mem.print(out[len..], "\\{c}", .{byte}) catch unreachable
             else if (format == .json)
-                std.fmt.bufPrint(out[len..], "\\u00{c}{c}", .{ hex[byte >> 4], hex[byte & 15] }) catch unreachable
+                std.mem.print(out[len..], "\\u00{c}{c}", .{ hex[byte >> 4], hex[byte & 15] }) catch unreachable
             else
-                std.fmt.bufPrint(out[len..], "\\x{c}{c}", .{ hex[byte >> 4], hex[byte & 15] }) catch unreachable;
+                std.mem.print(out[len..], "\\x{c}{c}", .{ hex[byte >> 4], hex[byte & 15] }) catch unreachable;
             len += escaped.len;
         } else {
             out[len] = byte;
@@ -279,8 +279,8 @@ test "log lines escape controls and JSON injection within the maximum buffer" {
     const payload = "bad\n\"event\":\"forged\"\\\x1b";
     const text = render(.text, .warn, "test", payload, 0, &out);
     try std.testing.expect(std.mem.startsWith(u8, text, "1970-01-01T00:00:00Z WARN  "));
-    try std.testing.expect(std.mem.indexOfScalar(u8, text[0 .. text.len - 1], '\n') == null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, text, 27) == null);
+    try std.testing.expect(std.mem.findScalar(u8, text[0 .. text.len - 1], '\n') == null);
+    try std.testing.expect(std.mem.findScalar(u8, text, 27) == null);
     const hostile: [message_capacity]u8 = @splat(1);
     const json = render(.json, .@"error", "test", &hostile, 0, &out);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
@@ -319,8 +319,8 @@ test "logger consumes deltas once, limits bursts, filters severity and skips idl
     logger.tick(999, &counts);
     try std.testing.expectEqual(@as(usize, 0), capture.len);
     logger.tick(1000, &counts);
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice(), "WARN  failures connect_failures=7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice(), "connection_resets") == null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "WARN  failures connect_failures=7") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "connection_resets") == null);
     const once = capture.len;
     logger.tick(2000, &counts);
     try std.testing.expectEqual(once, capture.len);
@@ -329,8 +329,8 @@ test "logger consumes deltas once, limits bursts, filters severity and skips idl
     counts.other_io_errors = 1;
     counts.last_other_io_errno = 4090;
     logger.tick(3000, &counts);
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice()[once..], "ERROR socket failures other_io_errors=1 last_other_io_errno=4090") != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice()[once..], "connect_failures") == null);
+    try std.testing.expect(std.mem.find(u8, capture.slice()[once..], "ERROR socket failures other_io_errors=1 last_other_io_errno=4090") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice()[once..], "connect_failures") == null);
     logger.level = .none;
     const muted = capture.len;
     logger.message(.@"error", "test", "fatal", .{});
@@ -345,11 +345,11 @@ test "maximum-width text totals, byte units and wrapping deltas stay bounded" {
     var capture: Capture = .{};
     const logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
     var counts: Counters = .{};
-    inline for (@typeInfo(Counters).@"struct".fields) |field| @field(counts, field.name) = std.math.maxInt(u64);
+    inline for (@typeInfo(Counters).@"struct".field_names) |field_name| @field(counts, field_name) = std.math.maxInt(u64);
     logger.snapshot(&counts);
     const summary = activity(counts);
     try std.testing.expect(summary.len <= message_capacity);
-    try std.testing.expect(std.mem.indexOf(u8, summary.slice(), "15.9EiB") != null);
+    try std.testing.expect(std.mem.find(u8, summary.slice(), "15.9EiB") != null);
     counts.accepted = 2;
     const changes = delta(counts, .{ .accepted = std.math.maxInt(u64) });
     try std.testing.expectEqual(@as(u64, 3), changes.accepted);
@@ -362,8 +362,8 @@ test "level changes flush visible pending failures without replaying muted count
     var logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
     var counts: Counters = .{ .accepted = 3, .closed = 3, .connect_failures = 3 };
     logger.cycle(10, &counts); // info -> debug: preserve the current interval.
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice(), "connect_failures=3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, capture.slice(), "activity; active=0 accepted=3 closed=3") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "connect_failures=3") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "activity; active=0 accepted=3 closed=3") != null);
     logger.cycle(20, &counts); // debug -> none
     counts.accepted += 7;
     counts.closed += 7;
@@ -375,6 +375,6 @@ test "level changes flush visible pending failures without replaying muted count
     logger.tick(2000, &counts);
     logger.periodic(&counts);
     const resumed = capture.slice()[muted..];
-    try std.testing.expect(std.mem.indexOf(u8, resumed, "connect_failures=") == null);
-    try std.testing.expect(std.mem.indexOf(u8, resumed, "activity;") == null);
+    try std.testing.expect(std.mem.find(u8, resumed, "connect_failures=") == null);
+    try std.testing.expect(std.mem.find(u8, resumed, "activity;") == null);
 }

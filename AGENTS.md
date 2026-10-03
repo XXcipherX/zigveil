@@ -1,6 +1,6 @@
 # Zigveil contributor and agent guide
 
-Zigveil is a Zig 0.16.0 Linux TCP passthrough daemon. Keep its scope small: inspect
+Zigveil is a Zig 0.17.0 Linux TCP passthrough daemon. Keep its scope small: inspect
 the initial ClientHello, choose a static SNI route, forward every byte unchanged.
 
 Read the relevant project guides before changing behavior:
@@ -15,7 +15,7 @@ Read the relevant project guides before changing behavior:
 
 ## Invariants
 
-1. Client input is untrusted. Every length and slice is checked in ReleaseFast too.
+1. Client input is untrusted. Every length and slice is checked in fast too.
 2. ClientHello parsing performs no I/O or allocation and never mutates its input.
 3. The entire received prefix is sent once, in order, before later client bytes.
 4. No serving-path heap allocation or growing queue; reservations stay bounded.
@@ -36,11 +36,11 @@ Read the relevant project guides before changing behavior:
     every exit; deferred live bytes belong to that connection's fixed ring.
 14. Dataplane diagnostics remain compile-time optional with zero production
     storage/work. Validate structural cleanup against the optimized baseline
-    using ordinary ReleaseFast and paired measurements on the same runner.
+    using ordinary fast and paired measurements on the same runner.
 
 ## Change discipline
 
-Use authoritative Zig 0.16.0 sources for API signatures. Do not translate old
+Use authoritative Zig 0.17.0 sources for API signatures. Do not translate old
 `std.net`/`std.posix` examples by guesswork. Keep the raw syscall boundary focused.
 Test behavior through the production engine with artificial partial I/O, then
 verify OS interactions through Linux integration tests. Report actual test results;

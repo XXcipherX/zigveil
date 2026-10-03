@@ -1,7 +1,7 @@
 # Zigveil
 
 [![Linux CI](https://github.com/XXcipherX/zigveil/actions/workflows/ci.yml/badge.svg)](https://github.com/XXcipherX/zigveil/actions/workflows/ci.yml)
-[![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-f7a41d)](https://ziglang.org/download/0.16.0/release-notes.html)
+[![Zig 0.17.0](https://img.shields.io/badge/Zig-0.17.0-f7a41d)](https://ziglang.org/download/0.17.0/release-notes.html)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A small Linux TCP passthrough proxy in Zig. Zigveil inspects the first TLS
@@ -37,27 +37,28 @@ the proxy's IP address; the proxy does not prepend a PROXY protocol header.
 
 ## Build and test
 
-Use **Zig 0.16.0**. Supported targets are Linux x86_64 and aarch64.
+Use exactly **Zig 0.17.0**, without a prerelease or build suffix. Supported targets
+are Linux x86_64 and aarch64.
 
 ```sh
 git clone https://github.com/XXcipherX/zigveil.git
 cd zigveil
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 zig build test
-zig build fuzz -Doptimize=ReleaseSafe
+zig build fuzz -Doptimize=safe
 python3 test/integration.py --binary zig-out/bin/zigveil
 ```
 
-`zig build` also supports Debug and ReleaseSafe. An explicit target can be supplied
+`zig build` also supports debug and safe. An explicit target can be supplied
 with `-Dtarget=x86_64-linux`. The build rejects other operating systems and Zig
 versions. No package manifest is needed because the build has no dependencies.
 Integration tests use Python 3 and OpenSSL; neither is required by the daemon.
 
-GitHub Actions verifies formatting, builds Debug, ReleaseSafe and ReleaseFast, runs
+GitHub Actions verifies formatting, builds debug, safe and fast, runs
 deterministic unit tests in all three modes, runs parser mutations with safety
-checks, exercises real Linux sockets in Debug and ReleaseFast, and smoke-tests the benchmark tools on native amd64
-and arm64 runners. It also builds and exercises both Docker images and verifies
-the Compose installer/update flow. Zig is fetched from its official release with
+checks, exercises real Linux sockets in debug and fast, and smoke-tests the benchmark tools on native amd64
+and arm64 runners. It also exercises fast/safe Docker images for amd64, arm64 and
+amd64-v3, checks PIE and verifies the Compose installer/update flow. Zig is fetched from its official release with
 a pinned SHA-256 checksum.
 
 The manual **Benchmarks** workflow measures bulk, latency and connection churn
@@ -150,7 +151,7 @@ docker run --rm --network host --read-only \
 ```
 
 For local image builds use `docker build -t zigveil .`; select safety checks with
-`--build-arg PRODUCTION_MODE=ReleaseSafe`. Both production modes build PIE binaries.
+`--build-arg PRODUCTION_MODE=safe`. Both production modes build PIE binaries.
 The runtime contains the daemon and a small entrypoint, without a compiler.
 `--check`, `--help` and `--version` pass through without creating a config.
 
@@ -289,7 +290,7 @@ New warning/error counts are combined into at most one message per severity per
 second, independently of the summary interval. Shutdown flushes pending counts.
 Resets and broken pipes appear in info summaries and debug close details; they
 still close the affected stream and remain in `io_errors`. Their log severity does
-not establish which application caused them. Ordinary FIN has no warning. Debug
+not establish which application caused them. Ordinary FIN has no warning. debug
 logs contain lifecycle metadata, never payloads, ClientHello contents or client IPs.
 
 `SIGUSR1` explicitly requests cumulative totals. Text groups related counters and

@@ -6,7 +6,7 @@ description: Development, review and CI-parity checks for Zigveil.
 
 1. Read AGENTS.md and the applicable skills. Trace ownership and phase transitions
    before editing. Confirm the change serves the narrow passthrough workload.
-2. Use Zig 0.16.0 API sources and Linux documentation to resolve uncertain signatures
+2. Use Zig 0.17.0 API sources and Linux documentation to resolve uncertain signatures
    or semantics. Keep assumptions distinguishable from measured evidence.
 3. Add focused tests for changed behavior through the production state machine.
    Parser tests must exercise malformed lengths and fragmentation under safety checks.
@@ -16,15 +16,15 @@ description: Development, review and CI-parity checks for Zigveil.
 zig fmt --check build.zig src
 zig build
 zig build test
-zig build -Doptimize=ReleaseSafe --prefix /tmp/zigveil-safe
-zig build test -Doptimize=ReleaseSafe
-zig build fuzz -Doptimize=ReleaseSafe
+zig build -Doptimize=safe --prefix /tmp/zigveil-safe
+zig build test -Doptimize=safe
+zig build fuzz -Doptimize=safe
 python3 -m py_compile test/*.py bench/*.py
 python3 bench/harness.py smoke
 python3 test/integration.py --binary zig-out/bin/zigveil
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
-zig build -Doptimize=ReleaseFast
-zig build test -Doptimize=ReleaseFast
+zig build -Doptimize=fast
+zig build test -Doptimize=fast
 python3 test/integration.py --binary zig-out/bin/zigveil
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
 ulimit -n 8192
@@ -34,6 +34,7 @@ python3 test/bench_harness.py --binary zig-out/bin/zigveil
 Docker/deployment changes additionally require shell syntax/lint, native image
 builds, `python3 test/docker_smoke.py --image IMAGE`, and the Compose installer E2E
 on a disposable systemd host. The normal CI runs these checks on amd64/arm64.
+Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
 Logging changes verify live levels, SIGUSR1/USR2, idle suppression, grouped rate
 limits, bounded escaping/units and unchanged JSON counters through actual sockets.
 Keep daemon readiness independent of log verbosity.
@@ -54,12 +55,12 @@ preserve bounded echo credit, failed-run JSON/nonzero status and cancellation cl
 For dataplane work, compare baseline/candidate in one Benchmarks job. Check separate
 generator/origin CPU, measurement-window skew, repeated paired deltas, tail latency
 under bulk load, exact payload validation and post-drain fd ownership. Measure
-`-Ddataplane_metrics=true` observer overhead against ordinary ReleaseFast. Perf
+`-Ddataplane_metrics=true` observer overhead against ordinary fast. Perf
 availability is a measured capability, not a prerequisite; missing counters are null.
 Run `test/bench_lab.py` against an instrumented binary and instrumented unit tests in
-Debug, ReleaseSafe and ReleaseFast. ReleaseSafe unit coverage also checks the
+debug, safe and fast. safe unit coverage also checks the
 buffered control. For structural cleanup, retain generated section/symbol
-sizes and compare normal ReleaseFast with the optimized baseline; repeat/localize
+sizes and compare normal fast with the optimized baseline; repeat/localize
 any sustained regression rather than accepting cleaner source as sufficient.
 Never retain an experimental dataplane solely on a noisy
 hosted-runner throughput result.

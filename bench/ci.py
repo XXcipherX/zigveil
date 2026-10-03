@@ -20,7 +20,7 @@ import collect
 import profiling
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_CASES = "bulk:1,bulk:10,bulk:100,bulk:1000,latency:1,latency:100,loaded-latency:100,churn:16"
+DEFAULT_CASES = "bulk:1,bulk:10,bulk:100,bulk:1000,latency:1,latency:10,latency:100,loaded-latency:100,churn:16"
 GAUGES = {"recv_max", "send_max", "splice_read_max", "splice_write_max", "pipe_max_capacity", "shared_pipe_capacity", "pipe_live", "epoll_max_batch", "active", "last_other_io_errno"}
 
 
@@ -516,7 +516,7 @@ def summarize(records, args):
                                    vs_baseline=comparisons, vs_candidate=observer))
     (args.output / "summary.json").write_text(json.dumps(groups, indent=2) + "\n")
     print(json.dumps(dict(event="summary", groups=groups), sort_keys=True), flush=True)
-    lines = ["## Paired relay measurements", "", "One runner; production ReleaseFast and diagnostic counters are shown separately.", "",
+    lines = ["## Paired relay measurements", "", "One runner; production fast and diagnostic counters are shown separately.", "",
              "| Workload | Configured ring | Variant / proxies | Passed | Echo Gbit/s (CV) | CPU s/Gbit | p50 / p99 / p99.9 µs | RSS MiB | Decision for this sample |",
              "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |"]
     def show(value):
@@ -595,8 +595,10 @@ def main():
     parser.add_argument("--options", default="{}", help="JSON: chunk_bytes, inflight_bytes, warmup, variants, drain_timeout, baseline_ring")
     args = parser.parse_args()
     options = json.loads(args.options)
-    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "cpu", "relay_splice", "baseline_splice"}:
+    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "baseline_zig", "cpu", "relay_splice", "baseline_splice"}:
         parser.error("unknown laboratory option")
+    if options.get("baseline_zig", "0.16.0") not in ("0.16.0", "0.17.0"):
+        parser.error("baseline_zig must be an exact supported release: 0.16.0 or 0.17.0")
     args.chunk_bytes, args.inflight_bytes = int(options.get("chunk_bytes", 65536)), int(options.get("inflight_bytes", 262144))
     args.warmup, args.drain_timeout = float(options.get("warmup", 1)), float(options.get("drain_timeout", 15))
     args.warmup_bytes = options.get("warmup_bytes")
@@ -667,6 +669,9 @@ def main():
     args.cpu_topology = collect.cpu_topology(cpus)
     metadata = dict(commit=os.environ.get("GITHUB_SHA"), baseline_sha=os.environ.get("BENCH_BASELINE_SHA"),
                     candidate_sha=os.environ.get("GITHUB_SHA"), build_mode=os.environ.get("BENCH_BUILD_MODE"),
+                    baseline_zig_version=os.environ.get("BENCH_BASELINE_ZIG_VERSION"),
+                    baseline_build_mode=os.environ.get("BENCH_BASELINE_BUILD_MODE"),
+                    candidate_zig_version=os.environ.get("BENCH_ZIG_VERSION"),
                     cpu_model=read_optional("/proc/cpuinfo"), architecture=platform.machine(), cpu_count=os.cpu_count(),
                     affinity=cpus, kernel=platform.release(), python=platform.python_version(), zig_version=os.environ.get("BENCH_ZIG_VERSION"),
                     rlimit_nofile=resource.getrlimit(resource.RLIMIT_NOFILE), parameters={k: v for k, v in vars(args).items() if k != "output"}, environment={})

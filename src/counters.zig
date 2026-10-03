@@ -66,7 +66,7 @@ pub const Counters = struct {
                 .NETRESET, .NETDOWN, .NETUNREACH, .HOSTDOWN, .HOSTUNREACH, .NONET => self.network_errors +%= 1,
                 else => {
                     self.other_io_errors +%= 1;
-                    self.last_other_io_errno = @intFromEnum(err);
+                    self.last_other_io_errno = @backingInt(err);
                 },
             },
         }
@@ -76,9 +76,9 @@ pub const Counters = struct {
         const prefix = "{\"event\":\"stats\"";
         @memcpy(bytes[0..prefix.len], prefix);
         var length: usize = prefix.len;
-        inline for (@typeInfo(Counters).@"struct".fields) |field| {
+        inline for (@typeInfo(Counters).@"struct".field_names) |field_name| {
             // The compile-time bound includes every u64 at its maximum width.
-            const part = std.fmt.bufPrint(bytes[length..], ",\"" ++ field.name ++ "\":{d}", .{@field(self, field.name)}) catch unreachable;
+            const part = std.mem.print(bytes[length..], ",\"" ++ field_name ++ "\":{d}", .{@field(self, field_name)}) catch unreachable;
             length += part.len;
         }
         @memcpy(bytes[length..][0..2], "}\n");
@@ -88,9 +88,9 @@ pub const Counters = struct {
 
 pub const max_snapshot_bytes = blk: {
     var length: usize = "{\"event\":\"stats\"".len + 2;
-    for (@typeInfo(Counters).@"struct".fields) |field| {
-        if (field.type != u64) @compileError("Update the stats width bound for non-u64 fields");
-        length += field.name.len + 4 + 20; // comma, quotes, colon, max u64 digits
+    for (@typeInfo(Counters).@"struct".field_names, @typeInfo(Counters).@"struct".field_types) |field_name, field_type| {
+        if (field_type != u64) @compileError("Update the stats width bound for non-u64 fields");
+        length += field_name.len + 4 + 20; // comma, quotes, colon, max u64 digits
     }
     break :blk length;
 };
@@ -101,7 +101,7 @@ comptime {
 
 test "maximum-width snapshot is complete valid JSON within the fixed buffer" {
     var counts: Counters = .{};
-    inline for (@typeInfo(Counters).@"struct".fields) |field| @field(counts, field.name) = std.math.maxInt(u64);
+    inline for (@typeInfo(Counters).@"struct".field_names) |field_name| @field(counts, field_name) = std.math.maxInt(u64);
     var storage: [snapshot_capacity]u8 = undefined;
     const bytes = counts.snapshot(&storage);
     try std.testing.expectEqual(max_snapshot_bytes, bytes.len);
@@ -109,8 +109,8 @@ test "maximum-width snapshot is complete valid JSON within the fixed buffer" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{ .parse_numbers = false });
     defer parsed.deinit();
     try std.testing.expectEqualStrings("stats", parsed.value.object.get("event").?.string);
-    try std.testing.expectEqual(@typeInfo(Counters).@"struct".fields.len + 1, parsed.value.object.count());
-    inline for (@typeInfo(Counters).@"struct".fields) |field| {
-        try std.testing.expectEqualStrings("18446744073709551615", parsed.value.object.get(field.name).?.number_string);
+    try std.testing.expectEqual(@typeInfo(Counters).@"struct".field_names.len + 1, parsed.value.object.count());
+    inline for (@typeInfo(Counters).@"struct".field_names) |field_name| {
+        try std.testing.expectEqualStrings("18446744073709551615", parsed.value.object.get(field_name).?.number_string);
     }
 }

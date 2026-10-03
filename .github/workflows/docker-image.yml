@@ -10,8 +10,8 @@ on:
         description: Production mode
         required: true
         type: choice
-        default: ReleaseFast
-        options: [ReleaseFast, ReleaseSafe]
+        default: fast
+        options: [fast, safe]
       push_latest:
         description: Also publish latest
         type: boolean

@@ -111,7 +111,7 @@ const Fake = struct {
         const pipe = &self.pipes[if (fd == 10) @as(usize, 0) else 1];
         const n = @min(bytes.len, pipe.len);
         @memcpy(bytes[0..n], pipe.data[0..n]);
-        std.mem.copyForwards(u8, &pipe.data, pipe.data[n..pipe.len]);
+        @memmove(pipe.data[0 .. pipe.len - n], pipe.data[n..pipe.len]);
         pipe.len -= n;
         return .{ .ok = n };
     }
@@ -142,7 +142,7 @@ const Fake = struct {
         const result = self.send(target, pipe.data[0..@min(pipe.len, bytes)]);
         switch (result) {
             .ok => |n| {
-                std.mem.copyForwards(u8, &pipe.data, pipe.data[n..pipe.len]);
+                @memmove(pipe.data[0 .. pipe.len - n], pipe.data[n..pipe.len]);
                 pipe.len -= n;
             },
             .err => {},
@@ -312,7 +312,7 @@ test "tiny reads never accumulate into splice eligibility; a large opaque read q
     rig.relay();
     var forward: [65536]u8 = undefined;
     rig.conn.to_backend.buffer = .{ .data = &forward };
-    const payload = [_]u8{0xa7} ** 32768;
+    const payload: [32768]u8 = @splat(0xa7);
     rig.io.client.input = &payload;
     rig.io.client.max_read = 64;
     rig.drive(&config, 12);
@@ -413,7 +413,7 @@ test "short-message phase returns to buffering and a later large read restores s
     rig.relay();
     rig.conn.splice_eligible = true;
     rig.io.use_pipes = true;
-    const tiny_phase = [_]u8{0x31} ** 2240;
+    const tiny_phase: [2240]u8 = @splat(0x31);
     rig.io.pipe_capacity = 65536;
     rig.io.client.input = &tiny_phase;
     rig.drive(&config, 1);
@@ -426,7 +426,7 @@ test "short-message phase returns to buffering and a later large read restores s
     try std.testing.expectEqual(@as(usize, 0), rig.io.pipe_fds_closed);
     var ring: [65536]u8 = undefined;
     rig.conn.to_backend.buffer = .{ .data = &ring };
-    const bulk_phase = [_]u8{0xc4} ** 32768;
+    const bulk_phase: [32768]u8 = @splat(0xc4);
     rig.io.client.input = &bulk_phase;
     rig.io.client.offset = 0;
     rig.io.backend.length = 0;
@@ -511,7 +511,7 @@ test "uneven large splice reads stop at the byte quantum without forcing a copie
     rig.io.client.max_read = 31713;
     var forward: [65536]u8 = undefined;
     rig.conn.to_backend.buffer = .{ .data = &forward };
-    const payload = [_]u8{0x9b} ** (engine.relay_byte_budget + 63);
+    const payload: [engine.relay_byte_budget + 63]u8 = @splat(0x9b);
     rig.io.client.input = &payload;
     rig.io.client.eof = true;
     rig.io.backend.input = "independent reply";
@@ -842,7 +842,7 @@ test "read errno classes and exact unknown errno traverse the production engine"
         .{ .err = .HOSTUNREACH, .cause = "network_errors" },
         .{ .err = .NONET, .cause = "network_errors" },
         .{ .err = .BADF, .cause = "other_io_errors" },
-        .{ .err = @enumFromInt(4090), .cause = "other_io_errors" },
+        .{ .err = @fromBackingInt(@as(u16, 4090)), .cause = "other_io_errors" },
     };
     for ([_]bool{ false, true }) |backend| for (cases) |case| {
         var rig: Rig = .{};
@@ -855,7 +855,7 @@ test "read errno classes and exact unknown errno traverse the production engine"
         try std.testing.expectEqual(if (backend) outcome.Side.backend else outcome.Side.client, detail.side);
         try std.testing.expectEqual(outcome.Operation.read, detail.operation);
         try std.testing.expectEqual(case.err, detail.failure.errno);
-        try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, case.cause, "other_io_errors")) @intFromEnum(case.err) else 0), rig.counts.last_other_io_errno);
+        try std.testing.expectEqual(@as(u64, if (std.mem.eql(u8, case.cause, "other_io_errors")) @backingInt(case.err) else 0), rig.counts.last_other_io_errno);
     };
 }
 
@@ -935,7 +935,7 @@ test "mixed connection failures keep aggregate and both dimensions consistent" {
     var config = try testConfig();
     defer config.deinit(std.testing.allocator);
     var counts: Counters = .{};
-    for ([_]outcome.Errno{ .CONNRESET, .PIPE, .NOTCONN, .CONNABORTED, .TIMEDOUT, .NETUNREACH, .BADF, @enumFromInt(4090) }, 0..) |err, index| {
+    for ([_]outcome.Errno{ .CONNRESET, .PIPE, .NOTCONN, .CONNABORTED, .TIMEDOUT, .NETUNREACH, .BADF, @fromBackingInt(@as(u16, 4090)) }, 0..) |err, index| {
         var rig: Rig = .{};
         rig.relay();
         const backend = index % 2 != 0;

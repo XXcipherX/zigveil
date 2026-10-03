@@ -4,7 +4,7 @@ Read [AGENTS.md](AGENTS.md) and the [architecture guide](docs/DESIGN.md) before
 changing the parser or dataplane. Keep the project specialized: fixed SNI routing
 and opaque TCP streams. New features need an explicit correctness or workload case.
 
-Use Zig 0.16.0 and run the checks in
+Use Zig 0.17.0 and run the checks in
 [the development workflow](.agent/workflows/development.md). Changes to observable
 behavior must update README/config examples and relevant deterministic or Linux
 integration tests. When execution is unavailable, report the missing checks and

@@ -7,7 +7,7 @@ description: Runtime ownership, bounded resources, SNI routing and opaque TCP re
 
 ## Stack and intent
 
-- Zig 0.16.0, Linux x86_64/aarch64, standard library only, no libc dependency.
+- Zig 0.17.0, Linux x86_64/aarch64, standard library only, no libc dependency.
 - One process, one level-triggered epoll loop, one mutable-state owner.
 - Optional externally managed SO_REUSEPORT processes; limits remain per process.
 - Static numeric addresses after startup hostname resolution; immutable JSON config.
@@ -80,7 +80,7 @@ buffer with a compile-time worst-case bound.
 SIGUSR2 changes only runtime verbosity in the serving loop. Periodic text activity
 uses interval deltas; warning/error groups use independent one-second deltas.
 Idle intervals and zero event fields stay quiet. JSON stats retain every counter.
-SIGUSR1 explicitly requests totals even at none. Debug lifecycle metadata is emitted
+SIGUSR1 explicitly requests totals even at none. debug lifecycle metadata is emitted
 only at phase transitions and close, never per packet. A fatal connection result
 is retained by value for that close record; it does not add successful-I/O work.
 All formatting is bounded and occurs after filtering; stderr writes may block.
@@ -116,5 +116,5 @@ ownership for structural changes; measure workloads before claiming a throughput
 or latency improvement or choosing capacity limits from performance results.
 Review the [measured decisions](../../../docs/DESIGN.md#performance-decisions-and-measured-rejected-ideas)
 before reintroducing event coalescing, readiness hints, smaller quanta or private
-pipes. Cleanup must preserve paired ordinary ReleaseFast performance, including
+pipes. Cleanup must preserve paired ordinary fast performance, including
 loaded latency and CPU/Gbit; diagnostic builds measure the observer effect.

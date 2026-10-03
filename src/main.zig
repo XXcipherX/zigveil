@@ -22,7 +22,7 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
     const allocator = arena.allocator();
     const args = try init.args.toSlice(allocator);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        net.print("zigveil 0.1.0 (Zig 0.16.0, Linux epoll)\n", .{});
+        net.print("zigveil 0.1.0 (Zig 0.17.0, Linux epoll)\n", .{});
         return;
     }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {

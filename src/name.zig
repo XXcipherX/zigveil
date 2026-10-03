@@ -40,6 +40,6 @@ test "hostname canonicalization and syntax" {
     for ([_][]const u8{ "", ".example", "example.", "a..b", "-a.b", "a-.b", "a_b", "127.0.0.1", "a\x00b", "a/b" }) |bad| {
         try std.testing.expectError(error.InvalidHostname, Name.parse(bad));
     }
-    const long = [_]u8{'a'} ** 64;
+    const long: [64]u8 = @splat('a');
     try std.testing.expectError(error.InvalidHostname, Name.parse(&long));
 }
