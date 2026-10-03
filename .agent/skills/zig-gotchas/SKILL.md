@@ -41,6 +41,11 @@ Raw sockaddr ports are network byte order; IPv4 bytes must preserve their memory
 layout. IPv6 flow/scope are zero because scoped literals are unsupported.
 Socket creation and accept4 include NONBLOCK and CLOEXEC atomically.
 EINTR retries I/O, not Linux close. MSG_NOSIGNAL makes EPIPE an ordinary error.
+Splice has no MSG_NOSIGNAL flag: Server scopes SIGPIPE ignore/restore while the
+shared path is enabled. Use nonblocking pipe/socket ends and null splice offsets.
+A pipe can exhaust page slots before its byte capacity; source EAGAIN with debt
+pauses reads until a successful write. Reclaim all pending bytes before returning
+to epoll, including fatal/yield exits; teardown never closes borrowed handles.
 Nonblocking connect success is checked with SO_ERROR only after that fd is ready.
 recv/send/shutdown/SO_ERROR carry `Result(T)` with the exact non-exhaustive Linux.E,
 not generic errors or a shared mutable errno slot. SO_ERROR's returned integer is
@@ -61,7 +66,7 @@ EINTR consumes an accept attempt instead of hiding an unlimited retry loop.
 
 Shutdown ENOTCONN is distinct from EPIPE/ECONNRESET. After debt drains, the engine
 probes SO_ERROR before completing the disconnected half; do not suppress pending
-reset errors or finish a write half while its prefix/ring remains queued.
+reset errors or finish a write half while its prefix/ring/pipe remains queued.
 
 Mask zero is not a reliable way to suppress HUP: remove a socket with no useful
 interest. Watch OUT only when there is debt. IN/RDHUP stops after real read EOF or

@@ -14,7 +14,7 @@ on:
         type: string
       baseline:
         description: Baseline ref, built on this same runner (empty disables)
-        default: '5cb53cbc526893bc7a7840d63579a778d3520a26'
+        default: '28cdf224036e8536fd8e4deba5324b3e3df773c7'
         type: string
       workloads:
         description: Comma-separated MODE:STREAMS
@@ -98,21 +98,31 @@ jobs:
           set -euo pipefail
           extra=()
           splice=$(python3 -c 'import json,os; v=json.loads(os.environ["BENCH_OPTIONS"]).get("baseline_splice"); assert v is None or type(v) is bool; print("" if v is None else str(v).lower())')
-          shared=$(python3 -c 'import json,os; v=json.loads(os.environ["BENCH_OPTIONS"]).get("baseline_shared"); assert v is None or type(v) is bool; print("" if v is None else str(v).lower())')
           if [[ -n "$splice" ]]; then extra+=(-Drelay_splice="$splice"); fi
-          if [[ -n "$shared" ]]; then
-            if python3 -c 'from pathlib import Path; import sys; sys.exit(0 if "\"relay_shared\"" in Path("build.zig").read_text() else 1)'; then
-              extra+=(-Drelay_shared="$shared")
-            elif [[ "$shared" != true ]]; then
-              echo "This baseline does not offer private relay pipes" >&2
-              exit 1
-            fi
-          fi
           zig build -Doptimize=ReleaseFast -Dcpu=baseline "${extra[@]}" --prefix "$RUNNER_TEMP/baseline"
           echo "BENCH_BASELINE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Build optional diagnostic ReleaseFast
         if: inputs.instrumentation
         run: zig build -Doptimize=ReleaseFast -Dcpu="$BENCH_CPU" -Drelay_splice="$BENCH_SPLICE" -Ddataplane_metrics=true --prefix "$RUNNER_TEMP/metrics"
+      - name: Record generated binary sizes and text sections
+        env:
+          HAVE_BASELINE: ${{ inputs.baseline != '' }}
+          HAVE_METRICS: ${{ inputs.instrumentation }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          variants=(candidate)
+          if [[ "$HAVE_BASELINE" == true ]]; then variants+=(baseline); fi
+          if [[ "$HAVE_METRICS" == true ]]; then variants+=(metrics); fi
+          for variant in "${variants[@]}"; do
+            binary="$RUNNER_TEMP/$variant/bin/zigveil"
+            stat --printf="$variant binary bytes: %s\n" "$binary"
+            size "$binary" | tee "$RUNNER_TEMP/results/$variant.sections.txt"
+            nm --print-size --size-sort "$binary" > "$RUNNER_TEMP/results/$variant.symbols.txt"
+            awk '$4 ~ /Connection.*(drive|pump)|Server.*run/' "$RUNNER_TEMP/results/$variant.symbols.txt"
+            objcopy --dump-section ".text=$RUNNER_TEMP/results/$variant.text.bin" "$binary" "$RUNNER_TEMP/$variant.inspection"
+            sha256sum "$RUNNER_TEMP/results/$variant.text.bin"
+          done
       - name: Measure paired workloads with coordinated CPU windows
         env:
           BENCH_BUILD_MODE: ReleaseFast

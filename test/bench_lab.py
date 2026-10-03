@@ -24,6 +24,7 @@ class Laboratory(unittest.TestCase):
         if NORMAL is None:
             self.skipTest("supply --normal-binary")
         self.assertNotIn(b'{"event":"dataplane"', Path(NORMAL).read_bytes())
+
     def test_paired_statistics_do_not_substitute_unpaired_medians(self):
         value = ci.paired([1, 10, 100], [2, 11, 100])
         self.assertAlmostEqual(10, value["delta_percent"])
@@ -151,7 +152,7 @@ class Laboratory(unittest.TestCase):
             result = subprocess.run([sys.executable, str(Path(ci.__file__)), "--binary", BINARY, "--baseline", BINARY,
                                      "--metrics-binary", BINARY, "--native-binary", NATIVE, "--processes", "2",
                                      "--duration", "1", "--repeats", "1", "--workloads", "bulk:100", "--profiling", "basic",
-                                     "--options", '{"variants":["baseline","metrics"],"baseline_processes":1,"baseline_shared":true,"warmup":0.05}',
+                                     "--options", '{"variants":["baseline","metrics"],"baseline_processes":1,"warmup":0.05}',
                                      "--output", directory], capture_output=True, text=True, timeout=30)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             records = {r["variant"]: r for r in (json.loads(p.read_text()) for p in Path(directory).glob("*/record.json"))}
@@ -162,6 +163,26 @@ class Laboratory(unittest.TestCase):
             for record in records.values():
                 self.assertTrue(record["passed"], record)
                 self.assertTrue(all(s["stats"]["active"] == 0 and s["proc"]["fds"] in s["allowed_idle_fds"] for s in record["after_drain"]))
+
+    def test_normal_baseline_reclaims_shared_fds_without_diagnostic_snapshot(self):
+        if NORMAL is None or NATIVE is None:
+            self.skipTest("supply --normal-binary and --native-binary")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, str(Path(ci.__file__)), "--binary", NORMAL, "--baseline", NORMAL,
+                                     "--native-binary", NATIVE, "--duration", "1", "--repeats", "1",
+                                     "--workloads", "bulk:10", "--profiling", "basic",
+                                     "--options", '{"variants":["baseline","candidate"],"warmup":0.05}',
+                                     "--output", directory], capture_output=True, text=True, timeout=30)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            records = [json.loads(p.read_text()) for p in Path(directory).glob("*/record.json")]
+            self.assertEqual({"baseline", "candidate"}, {r["variant"] for r in records})
+            for record in records:
+                self.assertTrue(record["passed"], record)
+                self.assertNotIn("dataplane", record)
+                drained = record["after_drain"][0]
+                self.assertEqual(0, drained["stats"]["active"])
+                self.assertEqual(drained["stats"]["accepted"], drained["stats"]["closed"])
+                self.assertEqual(10, drained["proc"]["fds"], "exercise an allocated shared pair in the ordinary build")
 
 
 if __name__ == "__main__":

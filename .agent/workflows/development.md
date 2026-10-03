@@ -16,6 +16,8 @@ description: Development, review and CI-parity checks for Zigveil.
 zig fmt --check build.zig src
 zig build
 zig build test
+zig build -Doptimize=ReleaseSafe --prefix /tmp/zigveil-safe
+zig build test -Doptimize=ReleaseSafe
 zig build fuzz -Doptimize=ReleaseSafe
 python3 -m py_compile test/*.py bench/*.py
 python3 bench/harness.py smoke
@@ -55,5 +57,9 @@ under bulk load, exact payload validation and post-drain fd ownership. Measure
 `-Ddataplane_metrics=true` observer overhead against ordinary ReleaseFast. Perf
 availability is a measured capability, not a prerequisite; missing counters are null.
 Run `test/bench_lab.py` against an instrumented binary and instrumented unit tests in
-Debug and ReleaseFast. Never retain an experimental dataplane solely on a noisy
+Debug, ReleaseSafe and ReleaseFast. ReleaseSafe unit coverage also checks the
+buffered control. For structural cleanup, retain generated section/symbol
+sizes and compare normal ReleaseFast with the optimized baseline; repeat/localize
+any sustained regression rather than accepting cleaner source as sufficient.
+Never retain an experimental dataplane solely on a noisy
 hosted-runner throughput result.

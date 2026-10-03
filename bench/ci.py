@@ -413,8 +413,10 @@ def trial(args, mode, count, variant, ring, repeat, capability, diagnostic=False
                 if time.monotonic() >= deadline:
                     raise RuntimeError("proxy did not reclaim connections after drain")
                 time.sleep(.02)
-            shared = (args.baseline_shared if variant == "baseline" else args.relay_splice) or snapshot.get("dataplane", {}).get("shared_pipe_capacity", 0) > 0
-            post.append(dict(proc=collect.snapshot(p.pid), stats=snapshot["stats"], allowed_idle_fds=[6, 10] if shared else [6]))
+            # A baseline may predate splice or use its own default. The retained
+            # architecture has either no pipes or exactly four process-owned fds.
+            splice = args.baseline_splice is not False if variant == "baseline" else args.relay_splice
+            post.append(dict(proc=collect.snapshot(p.pid), stats=snapshot["stats"], allowed_idle_fds=[6, 10] if splice else [6]))
         record["after_drain"] = post
         for client in clients:
             client.send("finish")
@@ -593,7 +595,7 @@ def main():
     parser.add_argument("--options", default="{}", help="JSON: chunk_bytes, inflight_bytes, warmup, variants, drain_timeout, baseline_ring")
     args = parser.parse_args()
     options = json.loads(args.options)
-    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "cpu", "relay_splice", "baseline_splice", "baseline_shared"}:
+    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "cpu", "relay_splice", "baseline_splice"}:
         parser.error("unknown laboratory option")
     args.chunk_bytes, args.inflight_bytes = int(options.get("chunk_bytes", 65536)), int(options.get("inflight_bytes", 262144))
     args.warmup, args.drain_timeout = float(options.get("warmup", 1)), float(options.get("drain_timeout", 15))
@@ -610,9 +612,6 @@ def main():
         parser.error("origin_io must be buffered or splice")
     args.relay_splice = options.get("relay_splice", {"true": True, "false": False}.get(os.environ.get("BENCH_SPLICE"), True))
     args.baseline_splice = options.get("baseline_splice")
-    args.baseline_shared = options.get("baseline_shared")
-    if args.baseline_shared is not None and type(args.baseline_shared) is not bool:
-        parser.error("baseline_shared must be boolean")
     args.relay_quantum = 262144
     if args.baseline_splice is not None and type(args.baseline_splice) is not bool:
         parser.error("baseline_splice must be boolean")
@@ -657,8 +656,7 @@ def main():
         parser.error("invalid warmup/drain timeout")
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     max_streams = max(n for _, n in args.cases)
-    baseline_fds = 6 if args.baseline_splice and args.baseline_shared is not True else 2
-    required = max(8192, max_streams * 2 + 256, max(2048, max_streams + 32) * baseline_fds + 12)
+    required = max(8192, max_streams * 2 + 256, max(2048, max_streams + 32) * 2 + 12)
     if hard != resource.RLIM_INFINITY and hard < required:
         parser.error(f"fd hard limit must be at least {required}")
     if soft != resource.RLIM_INFINITY and soft < required:

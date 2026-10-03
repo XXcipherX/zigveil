@@ -32,6 +32,11 @@ Read the relevant project guides before changing behavior:
 12. Filter logs before formatting. Default output is compact text; debug lifecycle
     details contain no payloads or client IPs. Preserve grouped warning rate limits,
     idle suppression, explicit snapshots and the complete JSON counter schema.
+13. Io owns two shared pipes, never a slot. A pump returns its borrow empty on
+    every exit; deferred live bytes belong to that connection's fixed ring.
+14. Dataplane diagnostics remain compile-time optional with zero production
+    storage/work. Validate structural cleanup against the optimized baseline
+    using ordinary ReleaseFast and paired measurements on the same runner.
 
 ## Change discipline
 

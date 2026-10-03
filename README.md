@@ -53,9 +53,9 @@ with `-Dtarget=x86_64-linux`. The build rejects other operating systems and Zig
 versions. No package manifest is needed because the build has no dependencies.
 Integration tests use Python 3 and OpenSSL; neither is required by the daemon.
 
-GitHub Actions verifies formatting, builds Debug and ReleaseFast, runs deterministic
-unit tests in both modes, runs parser mutations with safety checks, exercises real
-Linux sockets in both modes, and smoke-tests the benchmark tools on native amd64
+GitHub Actions verifies formatting, builds Debug, ReleaseSafe and ReleaseFast, runs
+deterministic unit tests in all three modes, runs parser mutations with safety
+checks, exercises real Linux sockets in Debug and ReleaseFast, and smoke-tests the benchmark tools on native amd64
 and arm64 runners. It also builds and exercises both Docker images and verifies
 the Compose installer/update flow. Zig is fetched from its official release with
 a pinned SHA-256 checksum.
@@ -96,7 +96,7 @@ DNS lookup, address rotation or retry across alternative addresses; restart to
 pick up DNS changes. `--check` verifies resolution and config, not TCP reachability.
 
 ```sh
-# Default capacity needs at least 2056 fds; keep room for the service environment.
+# Default capacity needs at least 2060 fds; keep room for the service environment.
 ulimit -n 4096
 ./zig-out/bin/zigveil --check examples/zigveil.json
 ./zig-out/bin/zigveil examples/zigveil.json
@@ -212,15 +212,16 @@ only for queued bytes. A full destination ring suspends the corresponding source
 read interest, letting TCP apply backpressure. Empty rings reset their head so the
 next read can use one contiguous span.
 
-After a large opaque read, the relay can use nonblocking `splice` through two
+After an opaque read of at least 16 KiB, the relay can use nonblocking `splice` through two
 pipes shared by the serving process. Each callback returns the pipes empty:
 blocked or partial output is saved in that connection's bounded ring. The
 original prefix stays ordered, and connections never share pending bytes.
-Repeated short messages return to buffered forwarding. Pipe allocation failure
+After 32 consecutive splice reads smaller than 1 KiB, drained connections return
+to buffered forwarding; a later large read can qualify again. Pipe allocation failure
 also keeps the buffered path usable. Build with `-Drelay_splice=false` to disable
 this path for a controlled comparison.
 
-EOF stops only that read half. Its remaining prefix/ring bytes are sent before
+EOF stops only that read half. Its remaining prefix/ring/pipe bytes are sent before
 `shutdown(SHUT_WR)` forwards FIN; the reverse half remains usable. Both finished
 halves, a reset, an I/O failure, or a timeout release the slot. Generation-tagged
 epoll tokens reject stale batch events when a slot or fd is reused.
@@ -245,7 +246,9 @@ The shared pipes add at most twice the configured ring capacity in kernel pipe
 storage and four descriptors per process. Startup requires a descriptor limit of
 at least `2 × max_connections + 12` (`+ 8` with splice disabled).
 
-The 64 KiB default favors sustained throughput. Smaller rings reduce memory
+The measured 64 KiB default favors sustained throughput. See the
+[recorded decisions](docs/DESIGN.md#performance-decisions-and-measured-rejected-ideas).
+Smaller rings reduce memory
 reservation and transfer sizes. The [benchmark guide](bench/README.md) explains
 how to compare sizes and account for CPU, latency and memory together.
 
@@ -352,8 +355,8 @@ not all the fields together. Connect and accept failures remain separate.
 
 | Side/operation counters | Observed operation on that socket |
 | --- | --- |
-| `client_read_errors`, `backend_read_errors` | Failed recvfrom |
-| `client_write_errors`, `backend_write_errors` | Failed sendto, including original prefix writes |
+| `client_read_errors`, `backend_read_errors` | Failed recvfrom or socket-to-pipe splice; a failed pipe reclaim belongs to that direction's source |
+| `client_write_errors`, `backend_write_errors` | Failed sendto or pipe-to-socket splice, including original prefix writes |
 | `client_shutdown_errors`, `backend_shutdown_errors` | Fatal SHUT_WR result after the queue drains |
 | `client_socket_errors`, `backend_socket_errors` | Failed getsockopt(SO_ERROR) or its nonzero pending error, on EPOLLERR or after drained ENOTCONN |
 
@@ -366,7 +369,7 @@ not all the fields together. Connect and accept failures remain separate.
 | `socket_timeouts` | ETIMEDOUT; distinct from the proxy's deadline `timeouts` |
 | `network_errors` | ENETRESET, ENETDOWN, ENETUNREACH, EHOSTDOWN, EHOSTUNREACH, ENONET |
 | `other_io_errors` | Any other fatal errno |
-| `zero_writes` | Zero-byte success from a nonempty send; no errno is invented |
+| `zero_writes` | Zero-byte success from a nonempty send/splice write; no errno is invented |
 
 `last_other_io_errno` is a gauge holding the exact most recent errno counted in
 `other_io_errors`, including values unknown to Zig's enum; zero means none observed.

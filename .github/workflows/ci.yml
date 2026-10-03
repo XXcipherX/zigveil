@@ -52,6 +52,11 @@ jobs:
       - name: Parser mutations with safety checks
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: zig build fuzz -Doptimize=ReleaseSafe
+      - name: ReleaseSafe build and unit tests
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
+        run: |
+          zig build -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/safe"
+          zig build test -Doptimize=ReleaseSafe
       - name: Python syntax and benchmark harness smoke
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
@@ -96,6 +101,7 @@ jobs:
         run: |
           ulimit -n 32768
           zig build test -Drelay_splice=false
+          zig build test -Doptimize=ReleaseSafe -Drelay_splice=false
           zig build test -Doptimize=ReleaseFast -Drelay_splice=false -Ddataplane_metrics=true
           zig build -Doptimize=ReleaseFast -Drelay_splice=false -Ddataplane_metrics=true -Dbench_tools=true
           python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
@@ -104,8 +110,7 @@ jobs:
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
           ulimit -n 32768
-          zig build test -Drelay_splice=true
-          zig build test -Doptimize=ReleaseFast -Drelay_splice=true -Ddataplane_metrics=true
+          zig build test -Doptimize=ReleaseSafe -Ddataplane_metrics=true
           zig build -Doptimize=ReleaseFast -Drelay_splice=true -Ddataplane_metrics=true -Dbench_tools=true
           python3 test/integration.py --binary zig-out/bin/zigveil --splice --diagnostics
           python3 bench/ci.py --binary zig-out/bin/zigveil --metrics-binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench \

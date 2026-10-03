@@ -61,8 +61,9 @@ race is not asserted: its existing error probe can consume reset before send.
 python3 test/integration.py --binary zig-out/bin/zigveil
 ```
 
-The CI runs unit and socket tests in Debug and ReleaseFast, parser mutations in
-ReleaseSafe, a smoke test of the benchmark workload, and focused harness regressions.
+The CI runs builds and unit tests in Debug, ReleaseSafe and ReleaseFast, socket
+tests in Debug and ReleaseFast, parser mutations in ReleaseSafe, a smoke test of
+the benchmark workload, and focused harness regressions.
 `test/bench_harness.py` checks bounded unreturned echo credit, delayed drain, failed
 measurement JSON and exit status, cancellation/close cleanup, and 1000 real streams
 through ReleaseFast Zigveil with clean byte counts, FIN and I/O counters:
@@ -104,6 +105,7 @@ preflight failures without depending on a startup banner.
 The optional `-Ddataplane_metrics=true` build has separate engine and real-socket
 coverage. `test/bench_lab.py` checks paired statistics, coordinated measurement
 windows, native/Python interoperability, two generators, exact bulk echo,
-under-load probes and child/fd cleanup. CI checks the shared splice default and
+under-load probes, ordinary baseline comparisons without diagnostics, and child/fd
+cleanup. CI checks the shared splice default and
 the `-Drelay_splice=false` buffered control. Diagnostic counters compile out of
 ordinary builds and keep the production stats schema intact.

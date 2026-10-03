@@ -57,7 +57,10 @@ Bulk-eligible callbacks may borrow the serving owner's two empty splice pipes.
 Always reclaim pending pipe bytes before returning, on every success/error/yield
 path. Spill live debt into that connection's bounded ring; discard fatal debt.
 Never carry another connection's bytes in a shared pipe across callbacks. Shared
-pipes close once with Io, never with a slot. Short-message fallback, prefix order,
+pipes close once with Io, never with a slot. `relay_pipe.Pipe` is the owned handle;
+`Borrowed` carries only a pump's handle copy and debt. `assertPipesReturned` checks
+null borrows at teardown; it must not become a late drain or resource-release path.
+Short-message fallback, prefix order,
 FIN-after-drain and typed socket failures remain the production state machine.
 
 ENOTCONN after drained SHUT_WR completes only that half when SO_ERROR is clear;
@@ -95,7 +98,7 @@ for compaction, growing queues or hidden std.Io jobs.
 
 An indexed heap holds one timer per active slot, updated on phase changes and
 cancelled before release. Absolute hello/connect/prefix timestamps differ from
-sliding relay activity. Positive recv/send byte counts update activity; EAGAIN,
+sliding relay activity. Positive recv/send/splice byte counts update activity; EAGAIN,
 readiness and EOF do not. Idle deadlines are rechecked lazily when the stored
 deadline is due, avoiding per-packet heap changes. Prefix expiry remains enabled
 when idle expiry is disabled. Socket and expiration quotas bound each event batch.
@@ -111,3 +114,7 @@ new bound or config key is necessary, validate it before bind and document units
 per-process semantics and the memory formula. Explain algorithmic costs and
 ownership for structural changes; measure workloads before claiming a throughput
 or latency improvement or choosing capacity limits from performance results.
+Review the [measured decisions](../../../docs/DESIGN.md#performance-decisions-and-measured-rejected-ideas)
+before reintroducing event coalescing, readiness hints, smaller quanta or private
+pipes. Cleanup must preserve paired ordinary ReleaseFast performance, including
+loaded latency and CPU/Gbit; diagnostic builds measure the observer effect.

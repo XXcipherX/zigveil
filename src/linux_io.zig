@@ -56,14 +56,14 @@ pub const Io = struct {
     }
 
     pub fn finishConnect(self: *Io, fd: i32) !void {
-        switch (socketErrorMeasured(fd, &self.metrics)) {
+        switch (socketError(fd, &self.metrics)) {
             .ok => {},
             .err => return error.SocketError,
         }
     }
 
     pub fn checkSocketError(self: *Io, fd: i32) Result(void) {
-        return socketErrorMeasured(fd, &self.metrics);
+        return socketError(fd, &self.metrics);
     }
 
     pub fn openRelayPipes(self: *Io, capacity: usize) ?relay_pipe.Pair {
@@ -95,8 +95,6 @@ pub const Io = struct {
             // must meet the bounded configured capacity or use the ring path.
             if (linux.errno(rc) != .SUCCESS or rc != capacity) return null;
             pipe.capacity = capacity;
-            pipe.pending = 0;
-            pipe.read_paused = false;
         }
         complete = true;
         self.metrics.add("pipe_activations", 1);
@@ -207,13 +205,9 @@ pub fn option(fd: i32, level: i32, name: u32, value: i32) !void {
     if (linux.errno(linux.setsockopt(fd, level, name, bytes.ptr, @intCast(bytes.len))) != .SUCCESS) return error.SocketOptionFailed;
 }
 
-pub fn socketError(fd: i32) Result(void) {
-    return socketErrorMeasured(fd, null);
-}
-
-fn socketErrorMeasured(fd: i32, metrics: ?*@import("metrics.zig").Metrics) Result(void) {
+fn socketError(fd: i32, metrics: *@import("metrics.zig").Metrics) Result(void) {
     while (true) {
-        if (metrics) |m| m.add("getsockopt", 1);
+        metrics.add("getsockopt", 1);
         var value: i32 = 0;
         var len: linux.socklen_t = @sizeOf(i32);
         const err = linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&value), &len));

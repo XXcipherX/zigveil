@@ -24,6 +24,9 @@ The ten inputs are duration, repeats, baseline, workloads, rings, profiling,
 processes, instrumentation, architecture and optional JSON options.
 Empty `baseline` omits that build. `instrumentation=false` omits the diagnostic
 binary. Profiling choices are `basic`, `perf-stat` and `perf-record`.
+The default baseline is the optimized production reference `28cdf224`; supply a
+different full commit when comparing another change. Match baseline/candidate
+configuration to isolate a code cleanup.
 
 | JSON option | Default | Purpose |
 | --- | --- | --- |
@@ -41,7 +44,6 @@ binary. Profiling choices are `basic`, `perf-stat` and `perf-record`.
 | `cpu` | `baseline` | Candidate code generation: `baseline`, `native`, or `x86_64_v3` on amd64 |
 | `relay_splice` | true | Production splice path; false provides a buffered control |
 | `baseline_splice` | baseline build default | Explicit splice build option for comparisons with a revision supporting it |
-| `baseline_shared` | baseline build default | Shared-pipe ownership and idle-fd accounting when comparing intermediate revisions; passes the legacy build option only if that revision supports it |
 
 For example, `-f 'options={"variants":["baseline","candidate"],"baseline_ring":16384}'`
 compares the requested candidate ring against a 16 KiB baseline. The summary
@@ -71,8 +73,7 @@ at 10 Hz. Native origin startup reports its actual I/O mode and any pipe fallbac
 Bulk/latency streams establish and warm up before a ready/go barrier. The
 latency probe uses 64-byte warmup messages, bulk uses 64 KiB. Multi-generator
 rates use the common earliest-start/latest-end window, not summed individual rates.
-The
-coordinator captures counters and `/proc`, enables optional perf, then starts
+The coordinator captures counters and `/proc`, enables optional perf, then starts
 timed payload. End snapshots precede authorization of FIN and tail drain.
 Setup and teardown are excluded from steady-state CPU metrics. Boundary times
 and skew are retained. Churn includes connect, ClientHello echo and close.
@@ -94,6 +95,16 @@ reported as `drain_seconds`. CPU/cycles use the steady window's actual proxy
 forwarded-byte counters. Both denominators are explicit. Corruption, timeout,
 stream failure, unexpected proxy errors or unreclaimed fds fail the trial.
 Failed rates are `null`; all owned child cleanup has deadlines.
+After drain, an ordinary proxy retains six base fds, or ten after lazy shared-pipe
+allocation. An explicitly buffered variant must retain six. Baselines predating
+splice can also be compared without a special ownership option; intermediate
+private-pipe experiments are outside the supported laboratory configuration.
+
+A [native direct-control investigation](https://github.com/XXcipherX/zigveil/actions/runs/37020854826)
+observed timeouts with 1000 streams and 1 MiB credit even without a proxy, alongside
+Linux TCP memory-pressure/drop counters. This large-window case remains a workload
+limitation requiring separate diagnosis. It is retained as a failed measurement,
+not silently reduced to smaller credit or interpreted as a proxy throughput result.
 
 Latency reports sample count, p50/p90/p95/p99, max, mean and standard deviation.
 p99.9 requires 10,000 retained samples; the reservoir holds at most one million.
@@ -140,6 +151,8 @@ Metadata records both revisions, compiler/build/options, CPU model/count/affinit
 kernel, visible frequency/governor, NUMA, cgroup quota/cpuset/memory limits, fd
 limits, TCP/pipe sysctls, parameters and perf capabilities. Unavailable values
 are `null`. Artifacts include child logs, configurations and before/after resources.
+Actions also retains binary section/symbol sizes and `.text` hashes to check
+generated behavior when a structural cleanup changes performance unexpectedly.
 
 ## Running on Linux
 

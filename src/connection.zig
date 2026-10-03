@@ -9,6 +9,10 @@ const outcome = @import("io_result.zig");
 const metrics = @import("metrics.zig");
 const relay_pipe = @import("relay_pipe.zig");
 pub const relay_byte_budget = 262144;
+const relay_call_budget = 128;
+const bulk_read_bytes = 16384;
+const short_read_bytes = 1024;
+const short_read_limit = 32;
 
 pub const Connect = struct { fd: i32, complete: bool };
 pub const State = enum { hello, connecting, relaying, closed };
@@ -17,7 +21,7 @@ pub const Direction = struct {
     buffer: Buffer,
     eof: bool = false,
     fin: bool = false,
-    pipe: if (relay_pipe.enabled) ?relay_pipe.Pipe else void = if (relay_pipe.enabled) null else {},
+    pipe: if (relay_pipe.enabled) ?relay_pipe.Borrowed else void = if (relay_pipe.enabled) null else {},
 
     fn queued(self: *const Direction) usize {
         if (relay_pipe.enabled) if (self.pipe) |pipe| return pipe.pending;
@@ -26,7 +30,7 @@ pub const Direction = struct {
 
     fn canRead(self: *const Direction) bool {
         if (self.eof) return false;
-        if (relay_pipe.enabled) if (self.pipe) |pipe| return !pipe.read_paused and pipe.pending < pipe.capacity;
+        if (relay_pipe.enabled) if (self.pipe) |pipe| return !pipe.read_paused and pipe.pending < pipe.handle.capacity;
         return self.buffer.len < self.buffer.data.len;
     }
 };
@@ -114,7 +118,7 @@ pub const Connection = struct {
             self.activity_ms = now;
         }
         if (self.state != .relaying) return;
-        if (relay_pipe.enabled and self.short_reads == 32 and
+        if (relay_pipe.enabled and self.short_reads == short_read_limit and
             self.to_backend.queued() == 0 and self.to_client.queued() == 0)
         {
             // A bulk stream can turn into short request/reply traffic. Queued
@@ -128,13 +132,11 @@ pub const Connection = struct {
         if (self.to_backend.fin and self.to_client.fin) self.close(.complete);
     }
 
-    /// Borrowed metadata never retains kernel ownership across slot reuse.
-    pub fn release(self: *Connection, _: anytype) void {
+    /// Teardown cannot return pipe debt: each pump must already have reclaimed it.
+    pub fn assertPipesReturned(self: *const Connection) void {
         if (relay_pipe.enabled) {
-            if (self.to_backend.pipe) |pipe| std.debug.assert(pipe.pending == 0);
-            if (self.to_client.pipe) |pipe| std.debug.assert(pipe.pending == 0);
-            self.to_backend.pipe = null;
-            self.to_client.pipe = null;
+            std.debug.assert(self.to_backend.pipe == null);
+            std.debug.assert(self.to_client.pipe == null);
         }
     }
 
@@ -215,7 +217,7 @@ pub const Connection = struct {
         var write_blocked = false;
         // Drain multiple chunks in one readiness turn, with a fairness quantum.
         // Level-triggered epoll redispatches unfinished ready work.
-        while (calls < 128 and sent < relay_byte_budget) {
+        while (calls < relay_call_budget and sent < relay_byte_budget) {
             var progress = false;
             const has_prefix = forward and self.stage != null;
             const queued = if (has_prefix) self.stage_len - self.stage_sent else direction.queued();
@@ -225,7 +227,7 @@ pub const Connection = struct {
                 const result = if (has_prefix)
                     io.send(target, self.stage.?[self.stage_sent..][0..limit])
                 else if (relay_pipe.enabled and direction.pipe != null)
-                    io.spliceWrite(direction.pipe.?.fds[0], target, limit)
+                    io.spliceWrite(direction.pipe.?.handle.fds[0], target, limit)
                 else
                     io.send(target, direction.buffer.readable()[0..@min(direction.buffer.readable().len, limit)]);
                 const n = switch (result) {
@@ -270,7 +272,7 @@ pub const Connection = struct {
             }
             // Do not read ahead after yielding this direction's send budget.
             // LT source readiness resumes the queue, including a pending EOF.
-            if ((!forward or self.stage == null) and direction.canRead() and !read_blocked and calls < 128 and sent < relay_byte_budget and
+            if ((!forward or self.stage == null) and direction.canRead() and !read_blocked and calls < relay_call_budget and sent < relay_byte_budget and
                 (write_blocked or direction.queued() < relay_byte_budget - sent))
             {
                 // Drain this direction's ring debt first, then resume splice
@@ -280,14 +282,14 @@ pub const Connection = struct {
                     self.splice_eligible and !self.pipe_failed)
                 {
                     if (io.openRelayPipes(direction.buffer.data.len)) |pipes|
-                        direction.pipe = pipes[if (forward) @as(usize, 0) else 1]
+                        direction.pipe = .{ .handle = pipes[if (forward) @as(usize, 0) else 1] }
                     else
                         self.pipe_failed = true;
                 }
                 calls += 1;
                 const room = if (write_blocked) std.math.maxInt(usize) else relay_byte_budget - sent - direction.queued();
                 const result = if (relay_pipe.enabled and direction.pipe != null)
-                    io.spliceRead(source, direction.pipe.?.fds[1], @min(room, direction.pipe.?.capacity - direction.pipe.?.pending))
+                    io.spliceRead(source, direction.pipe.?.handle.fds[1], @min(room, direction.pipe.?.handle.capacity - direction.pipe.?.pending))
                 else
                     io.recv(source, direction.buffer.writable()[0..@min(room, direction.buffer.writable().len)]);
                 const n = switch (result) {
@@ -313,15 +315,15 @@ pub const Connection = struct {
                         direction.eof = true;
                         io.metrics.add("pump_eof", 1);
                     } else if (relay_pipe.enabled and direction.pipe != null) {
-                        std.debug.assert(n <= direction.pipe.?.capacity - direction.pipe.?.pending);
+                        std.debug.assert(n <= direction.pipe.?.handle.capacity - direction.pipe.?.pending);
                         direction.pipe.?.pending += n;
-                        self.short_reads = if (n < 1024) @min(self.short_reads + 1, 32) else 0;
+                        self.short_reads = if (n < short_read_bytes) @min(self.short_reads + 1, short_read_limit) else 0;
                         self.activity_ms = now;
                     } else {
                         // A long sequence of tiny messages is still a small-I/O
                         // workload. Enter the pipe path only after a large
                         // opaque read, never because the ClientHello was large.
-                        if (relay_pipe.enabled and n >= 16384) self.splice_eligible = true;
+                        if (relay_pipe.enabled and n >= bulk_read_bytes) self.splice_eligible = true;
                         if (metrics.enabled and (direction.buffer.head + direction.buffer.len) % direction.buffer.data.len + n == direction.buffer.data.len)
                             io.metrics.add("ring_wrap", 1);
                         direction.buffer.produced(n);
@@ -354,7 +356,7 @@ pub const Connection = struct {
                 break;
             }
         }
-        if (calls >= 128) io.metrics.add("pump_call_budget", 1);
+        if (calls >= relay_call_budget) io.metrics.add("pump_call_budget", 1);
         if (sent >= relay_byte_budget) io.metrics.add("pump_byte_budget", 1);
         return true;
     }
@@ -366,7 +368,7 @@ pub const Connection = struct {
         std.debug.assert(direction.buffer.len == 0 and pipe.pending <= direction.buffer.data.len);
         var copied: usize = 0;
         while (copied < pipe.pending) {
-            const n = switch (io.readRelayPipe(pipe.fds[0], direction.buffer.data[copied..pipe.pending])) {
+            const n = switch (io.readRelayPipe(pipe.handle.fds[0], direction.buffer.data[copied..pipe.pending])) {
                 .ok => |n| n,
                 .err => |err| {
                     io.disableSharedPipes();

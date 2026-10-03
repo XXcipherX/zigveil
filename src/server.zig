@@ -322,7 +322,7 @@ pub const Server = struct {
         };
         net.close(slot.conn.client);
         net.close(slot.conn.backend);
-        slot.conn.release(&self.io);
+        slot.conn.assertPipesReturned();
         self.io.metrics.add("close", @as(u64, 1) + @intFromBool(slot.conn.backend >= 0));
         if (slot.staging) |staging| self.stages.release(staging);
         self.pool.release(index);

@@ -74,7 +74,7 @@ def run(image):
                 original = config.read_bytes()
                 environment = (install_dir / ".env").read_bytes()
                 pid = command("docker", "inspect", "-f", "{{.State.Pid}}", "zigveil").stdout.strip()
-                # Enough for the container runtime, below Zigveil's 2056-fd minimum.
+                # Enough for the container runtime, below Zigveil's 2060-fd minimum.
                 bad_env = dict(env, NOFILE_LIMIT="1024")
                 bad = command("bash", str(ROOT / "deploy/install_docker_compose.sh"), env=bad_env, check=False)
                 assert bad.returncode and "RaiseRLIMIT_NOFILE" in bad.stdout + bad.stderr, bad.stdout + bad.stderr

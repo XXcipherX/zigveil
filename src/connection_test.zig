@@ -359,7 +359,7 @@ test "shared pipes spill before yielding and never mix two connections" {
     second.drive(&rig.io, &config, 1, true, &rig.counts);
     try std.testing.expectEqualStrings("another connection", rig.io.backend.output[0..rig.io.backend.length]);
     second.close(.stopping);
-    second.release(&rig.io);
+    second.assertPipesReturned();
     try std.testing.expectEqual(@as(usize, 0), rig.io.pipe_fds_closed);
     rig.io.client.input = first;
     rig.io.client.offset = first_offset;
@@ -375,7 +375,7 @@ test "shared pipes spill before yielding and never mix two connections" {
     try std.testing.expectEqual(@as(usize, 1), rig.io.client.fins);
     try std.testing.expectEqual(@as(usize, 1), rig.io.backend.fins);
     try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
-    rig.conn.release(&rig.io);
+    rig.conn.assertPipesReturned();
     rig.io.disableSharedPipes();
     rig.io.disableSharedPipes();
     try std.testing.expectEqual(@as(usize, 4), rig.io.pipe_fds_closed);
@@ -546,7 +546,7 @@ test "pipe allocation fallback is once per serving owner; prefix debt cannot be 
     rig.drive(&config, 1);
     try std.testing.expectEqualSlices(u8, rig.io.client.input, rig.io.backend.output[0..rig.io.backend.length]);
     try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
-    rig.conn.release(&rig.io);
+    rig.conn.assertPipesReturned();
     rig.io.disableSharedPipes();
     rig.relay();
     rig.conn.splice_eligible = true;
