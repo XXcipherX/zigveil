@@ -1,7 +1,8 @@
 # Zigveil contributor and agent guide
 
 Zigveil is a Zig 0.17.0 Linux TCP passthrough daemon. Keep its scope small: inspect
-the initial ClientHello, choose a static SNI route, forward every byte unchanged.
+the initial ClientHello, choose a static SNI route or default backend, forward
+every original byte unchanged. Fallback alone may prepend an optional PROXY v2 header.
 
 Read the relevant project guides before changing behavior:
 
@@ -18,6 +19,7 @@ Read the relevant project guides before changing behavior:
 1. Client input is untrusted. Every length and slice is checked in fast too.
 2. ClientHello parsing performs no I/O or allocation and never mutates its input.
 3. The entire received prefix is sent once, in order, before later client bytes.
+   Optional fallback PROXY v2 precedes that prefix; ordinary routes stay raw.
 4. No serving-path heap allocation or growing queue; reservations stay bounded.
 5. Read EOF and write FIN are independent in both directions. Drain before SHUT_WR.
    ENOTCONN completes only the drained write half after a clear SO_ERROR probe.
@@ -37,6 +39,10 @@ Read the relevant project guides before changing behavior:
 14. Dataplane diagnostics remain compile-time optional with zero production
     storage/work. Validate structural cleanup against the optimized baseline
     using ordinary fast and paired measurements on the same runner.
+15. Fallback is pre-routing only. Classifier failure and partial EOF/deadline may
+    select it; empty input, fatal transport errors and capacity failures cannot.
+    A selected backend's failure never retries a second destination. PPv2 metadata
+    comes only from that accepted socket, never client-supplied metadata or guesses.
 
 ## Change discipline
 

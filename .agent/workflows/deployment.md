@@ -8,6 +8,13 @@ Use a verified fast or safe binary/image from a known commit.
 Deployment runs only on an authorized host. The Compose installer can install
 Docker on that host; creating or reviewing the script does not authorize running it.
 
+Fallback is the default pre-routing destination, including classification failure
+and partial input at EOF/deadline. Expose only an intended backend. Enabling
+fallback_proxy_protocol 2 requires a backend listener that consumes PROXY v2
+before TLS/data and trusts the proxy. SNI routes stay raw even if they share that
+endpoint. Preflight reports fallback/PROXY settings and optional staging headroom;
+verify real traffic after configuration changes. Selected backend failures never fail over.
+
 ## Image publication and Compose
 
 `Dockerfile` builds native Linux amd64/arm64 images with verified Zig 0.17.0 archives.

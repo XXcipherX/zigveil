@@ -6,6 +6,7 @@
 
 A small Linux TCP passthrough proxy in Zig. Zigveil inspects the first TLS
 ClientHello, selects a fixed backend by SNI, then relays both byte streams unchanged.
+An optional default backend also receives unclassified input and can opt into PROXY v2.
 It is designed for long-lived encrypted tunnels, continuous downloads and opaque
 TCP-over-TLS services.
 
@@ -18,8 +19,8 @@ client ── TCP :443 ── Zigveil ── TCP ── selected backend
 
 TLS stays between the client and backend. Zigveil has no certificates or private
 keys, does not terminate or decrypt TLS, and does not inspect application traffic.
-The incoming stream must begin with a compatible TLS ClientHello; after routing,
-the backend protocol is opaque.
+SNI routes require a compatible initial TLS ClientHello. An optional default
+backend receives input that cannot select a route; after selection the stream is opaque.
 
 ## Scope
 
@@ -32,8 +33,8 @@ the backend protocol is opaque.
 - Standard library only; no third-party Zig dependencies or libc requirement.
 
 There is no HTTP handling, TLS termination, DNS refresh while serving, routing reload, regex,
-load balancing, protocol transformation or QUIC/UDP support. Backend TCP peers see
-the proxy's IP address; the proxy does not prepend a PROXY protocol header.
+load balancing or QUIC/UDP support. Backend TCP peers see the proxy's IP address.
+Fallback alone can opt into a PROXY v2 preamble carrying the accepted socket's endpoints.
 
 ## Build and test
 
@@ -120,7 +121,8 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 
 | Optional key | Default | Meaning |
 | --- | --- | --- |
-| `fallback` | `null` | Backend for a valid hello with unknown or absent SNI |
+| `fallback` | `null` | Default pre-routing backend; accepts an IP or hostname with port |
+| `fallback_proxy_protocol` | `0` | `0`: raw fallback stream; `2`: prepend PROXY v2 to fallback only; requires `fallback` |
 | `max_connections` | `1024` | Total slots per process; range 1..65536 |
 | `max_handshakes` | `64` | Staging slots; range 1..max_connections |
 | `relay_buffer_bytes` | `65536` | Per direction; powers of two from 4096..65536 |
@@ -132,9 +134,64 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `log_format` | `"text"` | Readable `text` or machine-readable `json` |
 | `reuse_port` | `false` | Allow independently launched processes to share the listener |
 
-A malformed or over-limit ClientHello is closed even when fallback is configured.
-Without fallback, unknown and missing SNI are closed. Connect failures are closed;
-there is no failover to an unrelated route.
+Fallback is selected once, before connecting. It uses the same prefix and relay
+engine as a known SNI route. The parser's limits constrain inspection rather than
+the amount of opaque data a selected backend may receive.
+
+| Pre-routing condition | With fallback | Without fallback |
+| --- | --- | --- |
+| Complete ClientHello with known SNI | Exact route | Exact route |
+| Complete ClientHello with unknown or missing SNI | Fallback | Close: no route |
+| Malformed framing/name, non-TLS bytes, wire/record limit exceeded | Fallback | Close: invalid hello |
+| Clean EOF with a partial prefix | Fallback, then backend FIN after prefix drains | Close: invalid hello |
+| Hello deadline with a partial prefix | Fallback; later client bytes remain allowed | Close: timeout |
+| Clean EOF without bytes | Close normally; no backend connection | Same |
+| Hello deadline without bytes | Close: timeout; no backend connection | Same |
+| Fatal socket/read error or admission/staging exhaustion | Close | Same |
+| Immediate/asynchronous failure of any selected backend | Close; no second destination | Same |
+
+The hello deadline stays absolute. Partial input moves to fresh, bounded connect
+and prefix-send deadlines; fallback cannot hold staging indefinitely, even with
+idle timeout disabled. A timeout still counts when partial input is forwarded.
+The backend decides how to answer any received input; Zigveil generates no TLS or
+application response. An incomplete prefix can therefore receive a backend reply
+only after EOF or the hello deadline.
+
+### Fallback PROXY protocol v2
+
+For a backend listener configured to consume PROXY v2 **before** TLS/data:
+
+```json
+{
+  "listen": "0.0.0.0:443",
+  "routes": [],
+  "fallback": "127.0.0.1:9444",
+  "fallback_proxy_protocol": 2
+}
+```
+
+Keep the backend's PROXY listener restricted to trusted senders. With the default
+`0`, fallback receives the original stream byte-for-byte. With `2`, it receives
+`[PROXY v2 header][original staged prefix][later client bytes]`; the added header
+changes backend wire framing, while every original byte remains unchanged.
+Ordinary SNI routes always receive the raw stream, including when their endpoint
+equals fallback's endpoint. Such a shared listener must support both input forms.
+
+The [PROXY v2 format](https://www.haproxy.org/download/3.2/doc/proxy-protocol.txt)
+uses the binary signature, version/PROXY command `0x21`, TCP/IPv4 `0x11` with
+12 address bytes or TCP/IPv6 `0x21` with 36. Total header size is 28 or 52 bytes,
+without TLVs. Source is `getpeername()` and destination is `getsockname()` of the
+accepted client socket, including its real local address when listen is wildcard.
+Addresses and ports use network byte order. A mapped pair uses IPv4; two IPv6
+endpoints with only one mapped address retain IPv6. Unsupported/mixed native
+families close instead of fabricating metadata. Query failures retain exact socket
+errno accounting and close before opening a backend.
+
+Only PP-enabled fallback queries these endpoints and prepends the bounded header
+to reserved staging. Existing prefix offsets handle partial sends and EAGAIN;
+later data and FIN cannot overtake the header/prefix. Reverse traffic remains
+independent. TLS is still terminated by the backend, never Zigveil. `--check`
+reports fallback availability, PROXY version and the resulting buffer reservation.
 
 ## Docker image
 
@@ -234,8 +291,11 @@ Buffer reservation is:
 
 ```text
 max_connections × 2 × relay_buffer_bytes
-  + max_handshakes × 65536
+  + max_handshakes × (65536 + proxy_headroom)
 ```
+
+`proxy_headroom` is 52 when `fallback_proxy_protocol` is `2`, otherwise zero.
+Inspection remains capped at 65536 bytes; the spare bytes hold only the preamble.
 
 Defaults reserve **132 MiB of buffer address space**: 128 MiB of relay rings and
 4 MiB of staging, plus slot/config metadata. Pages are touched on use, so reservation
@@ -327,9 +387,10 @@ length-prefixed vectors and hostname syntax, skips unrelated extensions by lengt
 and rejects duplicate SNI or malformed extensions even after finding a name.
 
 Each plaintext record is capped at 16 KiB. The inspected wire prefix is capped at
-64 KiB and 64 TLS records. These are admission limits, not a maximum legal TLS
-ClientHello size. Larger inputs and extreme one-byte record fragmentation are
-rejected. Large key shares do not get a special small limit. The parser is a routing
+64 KiB and 64 TLS records. These bound SNI inspection, not the maximum legal TLS
+ClientHello size. Larger inputs and extreme one-byte record fragmentation cannot
+select an SNI route; they use fallback when configured, otherwise close. Large key
+shares do not get a special small limit. The parser is a routing
 parser, not a complete TLS validator; it does not negotiate ciphers or authenticate
 clients. After the first hello is selected, bytes are opaque, including a later
 HelloRetryRequest flight. No received prefix byte is stripped or modified.
@@ -344,9 +405,15 @@ is enabled to avoid holding small forwarding writes.
 
 Logs go to stderr. See [Logging](#logging) for levels and explicit snapshots.
 Counters include accepted,
-active, routed, unknown/missing SNI, invalid hello, connect failures, forwarded bytes,
+active, routed, fallback_routed, unknown/missing SNI, invalid hello, connect failures, forwarded bytes,
 timeouts, I/O errors, rejected admissions and closes. Forwarded byte counters count
-successful sends, including the complete staged wire prefix.
+successful original-stream sends, including the complete staged wire prefix and
+excluding a generated PROXY header. `routed` counts selected endpoints before
+connection attempts; `fallback_routed` is its fallback subset. Unknown/missing SNI,
+invalid input and deadline counters describe observations even when fallback is
+selected successfully. Clean empty EOF adds no invalid-hello event. Unsupported
+PROXY metadata increments `rejected`; actual address-query failures increment
+`client_socket_errors` and the matching I/O cause.
 
 `io_errors` counts fatal socket outcomes once per failed connection. It covers
 established streams and preserves the existing count of failed pre-routing client
@@ -357,9 +424,9 @@ not all the fields together. Connect and accept failures remain separate.
 | Side/operation counters | Observed operation on that socket |
 | --- | --- |
 | `client_read_errors`, `backend_read_errors` | Failed recvfrom or socket-to-pipe splice; a failed pipe reclaim belongs to that direction's source |
-| `client_write_errors`, `backend_write_errors` | Failed sendto or pipe-to-socket splice, including original prefix writes |
+| `client_write_errors`, `backend_write_errors` | Failed sendto or pipe-to-socket splice, including generated header and original prefix writes |
 | `client_shutdown_errors`, `backend_shutdown_errors` | Fatal SHUT_WR result after the queue drains |
-| `client_socket_errors`, `backend_socket_errors` | Failed getsockopt(SO_ERROR) or its nonzero pending error, on EPOLLERR or after drained ENOTCONN |
+| `client_socket_errors`, `backend_socket_errors` | Failed SO_ERROR probe or its pending error; client also includes failed PROXY peer/local address queries |
 
 | Cause counter | Linux result |
 | --- | --- |

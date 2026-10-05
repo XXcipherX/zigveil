@@ -43,6 +43,11 @@ Keep daemon readiness independent of log verbosity.
    backpressure masks, FIN ordering, fd/token reuse, deadline progress and teardown.
 6. Update README, design notes, agent guides and fixtures when their contract changes.
    Source is authoritative; documents must not describe an abandoned implementation.
+   Routing changes must cover classification failure, partial/empty EOF and hello
+   expiry, exact prefix debt, no connect failover and timer-driven fd reconciliation.
+   Fallback PROXY v2 also needs independent binary/header checks, real accepted
+   endpoints, partial header/prefix writes, pooled reuse, metadata failure, real TLS
+   after preamble consumption and zero queries/header on ordinary routes.
 7. Check the actual workflow result for the final commit. Report which checks ran
    and any limits; absence of execution is not a passing test result.
 

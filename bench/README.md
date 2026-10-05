@@ -14,12 +14,12 @@ including failures. amd64 and arm64 results are separate.
 
 ```sh
 gh workflow run benchmarks.yml \
-  -f baseline=BASELINE_COMMIT -f duration=30 -f repeats=5 \
+  -f baseline=BASELINE_COMMIT -f duration=30 -f repeats=3 \
   -f workloads=bulk:1,bulk:10,bulk:100,bulk:1000,latency:1,loaded-latency:100,churn:16 \
   -f rings=16384,32768,65536 -f profiling=basic -f architecture=both
 ```
 
-Use 10 seconds × 3 repetitions for discovery and 30 seconds × 5 for confirmation.
+Use 10 seconds × 3 repetitions for discovery and 30 seconds × 3 for confirmation.
 The ten inputs are duration, repeats, baseline, workloads, rings, profiling,
 processes, instrumentation, architecture and optional JSON options.
 Empty `baseline` omits that build. `instrumentation=false` omits the diagnostic

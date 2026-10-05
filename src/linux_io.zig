@@ -5,6 +5,7 @@ const Address = @import("config.zig").Address;
 const Connect = @import("connection.zig").Connect;
 const Result = @import("io_result.zig").Result;
 const relay_pipe = @import("relay_pipe.zig");
+const proxy_protocol = @import("proxy_protocol.zig");
 
 pub const Io = struct {
     metrics: @import("metrics.zig").Metrics = .{},
@@ -64,6 +65,36 @@ pub const Io = struct {
 
     pub fn checkSocketError(self: *Io, fd: i32) Result(void) {
         return socketError(fd, &self.metrics);
+    }
+
+    /// Only fallback with PROXY v2 calls this; addresses belong to the accepted socket.
+    pub fn prepareProxyHeader(self: *Io, fd: i32, header: *[proxy_protocol.max_header_bytes]u8) proxy_protocol.PrepareResult {
+        const source = switch (self.socketAddress(fd, true)) {
+            .ok => |address| address,
+            .err => |err| return .{ .err = err },
+            .unsupported => return .unsupported,
+        };
+        const destination = switch (self.socketAddress(fd, false)) {
+            .ok => |address| address,
+            .err => |err| return .{ .err = err },
+            .unsupported => return .unsupported,
+        };
+        return .{ .ok = proxy_protocol.encode(header, source, destination) catch return .unsupported };
+    }
+
+    fn socketAddress(self: *Io, fd: i32, comptime peer: bool) union(enum) { ok: Address, err: linux.E, unsupported } {
+        while (true) {
+            var address: SockAddress = .{ .storage = std.mem.zeroes(linux.sockaddr.storage), .len = @sizeOf(linux.sockaddr.storage) };
+            self.metrics.add(if (peer) "getpeername" else "getsockname", 1);
+            const rc = if (peer)
+                linux.getpeername(fd, @ptrCast(&address.storage), &address.len)
+            else
+                linux.getsockname(fd, @ptrCast(&address.storage), &address.len);
+            const err = linux.errno(rc);
+            if (err == .INTR) continue;
+            if (err != .SUCCESS) return .{ .err = err };
+            return .{ .ok = address.decode() orelse return .unsupported };
+        }
     }
 
     pub fn openRelayPipes(self: *Io, capacity: usize) ?relay_pipe.Pair {
@@ -193,7 +224,39 @@ const SockAddress = struct {
         }
         return result;
     }
+
+    fn decode(self: *const SockAddress) ?Address {
+        if (self.len > @sizeOf(linux.sockaddr.storage)) return null;
+        switch (self.storage.family) {
+            linux.AF.INET => {
+                if (self.len < @sizeOf(linux.sockaddr.in)) return null;
+                const address: *const linux.sockaddr.in = @ptrCast(&self.storage);
+                return .{ .ip4 = .{ .bytes = std.mem.toBytes(address.addr), .port = std.mem.bigToNative(u16, address.port) } };
+            },
+            linux.AF.INET6 => {
+                if (self.len < @sizeOf(linux.sockaddr.in6)) return null;
+                const address: *const linux.sockaddr.in6 = @ptrCast(&self.storage);
+                return .{ .ip6 = .{ .bytes = address.addr, .port = std.mem.bigToNative(u16, address.port) } };
+            },
+            else => return null,
+        }
+    }
 };
+
+test "socket endpoint decoding preserves address memory bytes and validates returned lengths" {
+    for ([_][]const u8{ "192.0.2.9:4660", "[2001:db8::7]:443", "[::ffff:192.0.2.9]:4660" }) |literal| {
+        const endpoint = try Address.parseLiteral(literal);
+        var address = SockAddress.init(endpoint);
+        try std.testing.expect(std.meta.eql(endpoint, address.decode().?));
+        address.len -= 1;
+        try std.testing.expect(address.decode() == null);
+        address.len = @sizeOf(linux.sockaddr.storage) + 1;
+        try std.testing.expect(address.decode() == null);
+        address.len = @sizeOf(linux.sockaddr.storage);
+        address.storage.family = linux.AF.UNIX;
+        try std.testing.expect(address.decode() == null);
+    }
+}
 
 fn socket(family: u16) !i32 {
     const rc = linux.socket(family, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);

@@ -11,7 +11,8 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Record fragmentation | Multi-record valid input, split SNI, excessive record count |
 | Input rejection | Record/handshake/vector lengths, duplicate SNI, malformed tail/name, over-limit input |
 | Bounds | Maximum 65536-byte wire prefix and larger hostile input |
-| Routing | Case folding, exact/unknown/missing names, fallback and no fallback on invalid input |
+| Routing | Exact/unknown/missing names, default fallback for classifier failure and partial EOF/deadline; empty input, fatal errors and connect failure never reroute |
+| Fallback preamble | Exact independent IPv4/IPv6/mapped PROXY v2 bytes, mixed/query failures, partial header/prefix writes, EAGAIN, async connect, reverse reply, FIN ordering and pooled reuse; ordinary routes never query or prepend |
 | Hostname backends | Mandatory port, URLs rejected, startup resolution, IPv4 preference/IPv6-only selection, failure cleanup and resolved self-target validation |
 | Self targets | Exact/wildcard-loopback and mapped aliases in routes/fallback; other ports, remote peers and V6ONLY family independence |
 | Accept errors | Production raw-result decoder: interrupted, empty, per-connection, resource-pressure and fatal outcomes |
@@ -39,7 +40,11 @@ admission recovery, connect refusal, reset churn, fd reclamation, actual fd-quot
 backoff without spinning through repeated recovery with an established stream,
 self-target config rejection before bind, V6ONLY forwarding to IPv4/mapped backends
 on the listener port, a single OS thread and
-real TLS passthrough through an IPv6 backend. Certificates are generated temporarily
+real TLS passthrough through an IPv6 backend and a PROXY v2-consuming fallback.
+Fallback socket tests additionally check actual peer/local endpoints on wildcard
+IPv4/IPv6 listeners, raw known routes, classification limits, partial EOF/deadline,
+empty input, fd/staging recovery with one slot, no unrelated connect failover and
+config preflight/version validation. Certificates are generated temporarily
 by OpenSSL. It does not require third-party Python packages.
 
 Live logging tests check compact text, explicit grouped totals, warning bursts,

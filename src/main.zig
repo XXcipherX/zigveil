@@ -45,7 +45,7 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
     log.format = config.raw.value.log_format;
     try net.checkFdLimit(config.raw.value.max_connections);
     if (check) {
-        net.print("zigveil: config valid; routes={d} buffers={d} bytes; fd limit sufficient\n", .{ config.routes.len, Config.bufferBytes(config.raw.value) });
+        net.print("zigveil: config valid; routes={d} fallback={} fallback_proxy_protocol={d} buffers={d} bytes; fd limit sufficient\n", .{ config.routes.len, config.fallback != null, config.raw.value.fallback_proxy_protocol, Config.bufferBytes(config.raw.value) });
         return;
     }
     var server = try Server.init(std.heap.page_allocator, &config, log);

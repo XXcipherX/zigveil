@@ -31,18 +31,28 @@ restart. The selected IPv4 (otherwise IPv6) still undergoes self-target checks.
 | Counter | Investigate |
 | --- | --- |
 | `unknown_sni` / `missing_sni` | Client's visible name and configured route/fallback |
-| `invalid_client_hello` | Framing, name syntax, 64 KiB / 64-record admission limits |
+| `routed` / `fallback_routed` | All selected endpoints / fallback subset; selection precedes connect |
+| `invalid_client_hello` | Framing/name/inspection failure or partial EOF, including successfully forwarded fallback input |
 | `connect_failures` | Selected target IP, routing/firewall and backend listener |
-| `rejected` | Connection or staging capacity and descriptor resources |
+| `rejected` | Connection/staging capacity, descriptor resources or unsupported PROXY socket metadata |
 | `accept_errors` | Pending connection errors or fd/memory pressure; only resource pressure backs off |
 | `timeouts` | Absolute hello/connect/prefix or established idle deadline |
 | `io_errors` | Aggregate fatal socket outcomes; inspect side/operation and cause below |
-| forwarded bytes | Successful sends including the original hello; not queued-byte estimates |
+| forwarded bytes | Successful original-stream sends including the hello; generated PROXY header is excluded |
+
+Partial hello expiry can select fallback and still increments timeouts; empty
+expiry closes. Classifier counters are observations, not necessarily drops. Debug
+proxy_metadata_failed identifies unsupported endpoint metadata. Actual PROXY
+address-query errors retain client_socket_errors and their exact errno cause;
+they do not log addresses or header contents. Known-SNI backend failure never
+reroutes to fallback. Verify that a PP-enabled backend consumes the preamble before
+TLS/data when debugging immediate backend disconnects.
 
 For `io_errors`, use the [README counter tables](../../README.md#clienthello-and-security-limits).
 `client_*` / `backend_*` name the actual socket: a forward send is a backend write,
-not a client write. `*_socket_errors` is a failed SO_ERROR probe or the pending errno
-it retrieved; it is not proof that recv/send failed. Each event increments one
+not a client write. `*_socket_errors` is a failed SO_ERROR probe, its pending errno,
+or a failed client peer/local endpoint query for PROXY v2; it is not proof that
+recv/send failed. Each event increments one
 operation and one cause, so sum each dimension separately against `io_errors`.
 `last_other_io_errno` records only the most recent unclassified numeric errno and
 must not be summed. `socket_timeouts` (ETIMEDOUT) differ from proxy deadlines.

@@ -41,9 +41,9 @@ def hello(name="example.com", fragment=16384, padding=0):
                     for part in (handshake[p:p + fragment] for p in range(0, len(handshake), fragment)))
 
 
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
+def free_port(ipv6=False):
+    with socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("::1" if ipv6 else "127.0.0.1", 0))
         return sock.getsockname()[1]
 
 
@@ -72,6 +72,24 @@ def echo(sock):
         if not chunk:
             return
         sock.sendall(chunk)
+
+
+def proxy_v2_header(source, destination, ipv6=False):
+    family = socket.AF_INET6 if ipv6 else socket.AF_INET
+    addresses = socket.inet_pton(family, source[0]) + socket.inet_pton(family, destination[0])
+    payload = addresses + struct.pack("!HH", source[1], destination[1])
+    return b"\r\n\r\n\0\r\nQUIT\n" + bytes((0x21, 0x21 if ipv6 else 0x11)) + struct.pack("!H", len(payload)) + payload
+
+
+def read_proxy_v2(sock):
+    # Independent receiver: consume exactly the preamble, leaving TLS/data in TCP.
+    fixed = exact(sock, 16)
+    if fixed[:13] != b"\r\n\r\n\0\r\nQUIT\n\x21" or fixed[13] not in (0x11, 0x21):
+        raise AssertionError("invalid PROXY v2 signature/command/family")
+    length = int.from_bytes(fixed[14:16], "big")
+    if length != (12 if fixed[13] == 0x11 else 36):
+        raise AssertionError("unexpected address length or TLV")
+    return fixed + exact(sock, length)
 
 
 class Origin:
@@ -202,7 +220,8 @@ class Daemon:
         raise AssertionError(f"condition timed out: {self.logs()}")
 
     def connect(self):
-        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        host = "::1" if self.config["listen"].startswith("[") else "127.0.0.1"
+        sock = socket.create_connection((host, self.port), timeout=5)
         sock.settimeout(5)
         return sock
 
@@ -294,10 +313,166 @@ class Integration(unittest.TestCase):
                 self.assertEqual(1, counts["missing_sni"])
                 self.assertGreaterEqual(counts["invalid_client_hello"], 3)
             with Daemon(origin.address, fallback=origin.address) as proxy:
+                wires = (hello("unknown.example.com"), hello(None), b"GET / HTTP/1.1\r\n\r\n",
+                         b"\x16\x03\x01\xff\xff", b"\x16\x03\x01\0\x04\x02\0\0\0", hello(fragment=1),
+                         hello("unknown.example.com", fragment=16000, padding=65450))
+                for wire in wires:
+                    with self.subTest(wire_size=len(wire)), proxy.connect() as client:
+                        wire += b"opaque"
+                        client.sendall(wire)
+                        client.shutdown(socket.SHUT_WR)
+                        self.assertEqual(wire, all_bytes(client))
+                self.assert_clean_drain(proxy)
+                counts = proxy.snapshot()
+                self.assertEqual(len(wires), counts["fallback_routed"])
+                self.assertEqual(1, counts["unknown_sni"])
+                self.assertEqual(1, counts["missing_sni"])
+                self.assertEqual(5, counts["invalid_client_hello"])
+
+    def test_partial_eof_timeout_and_empty_input_fallback_policy(self):
+        received = []
+        def after_fin(sock):
+            received.append(all_bytes(sock))
+            sock.sendall(b"reply after FIN")
+            sock.shutdown(socket.SHUT_WR)
+
+        with Origin(after_fin) as origin, Daemon(origin.address, fallback=origin.address,
+                                               hello_timeout_ms=250, max_connections=2, max_handshakes=1) as proxy:
+            fds = len(os.listdir(f"/proc/{proxy.process.pid}/fd"))
+            prefix = hello()[:15]
+            with proxy.connect() as client:
+                client.sendall(prefix)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(b"reply after FIN", all_bytes(client))
+            self.assert_clean_drain(proxy)
+            with proxy.connect() as client:
+                client.sendall(prefix)
+                proxy.wait_for(lambda: proxy.snapshot()["fallback_routed"] == 2)
+                # The hello deadline chose the backend without closing the read half.
+                client.sendall(b"late bytes")
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(b"reply after FIN", all_bytes(client))
+            self.assert_clean_drain(proxy)
+            for eof in (True, False):
                 with proxy.connect() as client:
-                    wire = hello("unknown.example.com") + b"opaque"
-                    client.sendall(wire)
-                    self.assertEqual(wire, exact(client, len(wire)))
+                    if eof:
+                        client.shutdown(socket.SHUT_WR)
+                    self.assert_closed(client)
+                self.assert_clean_drain(proxy)
+            self.assertEqual([prefix, prefix + b"late bytes"], received)
+            counts = proxy.snapshot()
+            self.assertEqual(4, counts["accepted"])
+            self.assertEqual(2, counts["routed"])
+            self.assertEqual(2, counts["fallback_routed"])
+            self.assertEqual(1, counts["invalid_client_hello"])
+            self.assertEqual(2, counts["timeouts"])
+            self.assertEqual(fds, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
+
+    def test_fallback_proxy_v2_exact_socket_addresses_and_reused_slots(self):
+        for ipv6 in (False, True):
+            records = []
+            def framed_echo(sock):
+                records.append(read_proxy_v2(sock))
+                echo(sock)
+
+            with self.subTest(ipv6=ipv6), Origin(framed_echo, ipv6=ipv6) as origin:
+                listen = f"[::]:{free_port(True)}" if ipv6 else f"0.0.0.0:{free_port()}"
+                with Daemon(origin.address, listen=listen, routes=[], fallback=origin.address,
+                            fallback_proxy_protocol=2, max_connections=1, max_handshakes=1, hello_timeout_ms=250) as proxy:
+                    fds = len(os.listdir(f"/proc/{proxy.process.pid}/fd"))
+                    for case in range(8):
+                        with proxy.connect() as client:
+                            expected = proxy_v2_header(client.getsockname(), client.getpeername(), ipv6)
+                            wire = (hello(None), hello("unknown.example.com"), b"GET / HTTP/1.1\r\n\r\n",
+                                    hello()[:15])[case % 4]
+                            client.sendall(wire)
+                            if case == 7:  # Let the partial hello reach its deadline before FIN.
+                                self.assertEqual(wire, exact(client, len(wire)))
+                                tail = b"later opaque bytes"
+                                client.sendall(tail)
+                                wire = tail
+                            client.shutdown(socket.SHUT_WR)
+                            self.assertEqual(wire, all_bytes(client))
+                            self.assertEqual(expected, records[-1])
+                        self.assert_clean_drain(proxy)
+                        self.assertEqual(fds, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
+                    counts = proxy.snapshot()
+                    self.assertEqual(8, counts["routed"])
+                    self.assertEqual(8, counts["fallback_routed"])
+                    self.assertEqual(1, counts["timeouts"])
+                    if DIAGNOSTICS:
+                        values = [event for event in proxy.events() if event.get("event") == "dataplane"][-1]
+                        self.assertEqual(8, values["getpeername"])
+                        self.assertEqual(8, values["getsockname"])
+
+    def test_fallback_cannot_bypass_staging_capacity(self):
+        def framed_echo(sock):
+            read_proxy_v2(sock)
+            echo(sock)
+
+        with Origin(framed_echo) as origin, Daemon(origin.address, routes=[], fallback=origin.address,
+                                                  fallback_proxy_protocol=2, max_connections=2, max_handshakes=1) as proxy:
+            fds = len(os.listdir(f"/proc/{proxy.process.pid}/fd"))
+            with proxy.connect() as held:
+                proxy.wait_for(lambda: proxy.snapshot()["active"] == 1)
+                with proxy.connect() as rejected:
+                    rejected.sendall(b"unclassified bytes")
+                    self.assert_closed(rejected)
+                counts = proxy.snapshot()
+                self.assertEqual(1, counts["rejected"])
+                self.assertEqual(0, counts["fallback_routed"])
+                prefix = hello()[:15]
+                held.sendall(prefix)
+                held.shutdown(socket.SHUT_WR)
+                self.assertEqual(prefix, all_bytes(held))
+            self.assert_clean_drain(proxy)
+            with proxy.connect() as client:
+                wire = hello(None)
+                client.sendall(wire)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(wire, all_bytes(client))
+            self.assert_clean_drain(proxy)
+            self.assertEqual(2, proxy.snapshot()["fallback_routed"])
+            self.assertEqual(fds, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
+
+    def test_known_route_never_receives_fallback_proxy_header(self):
+        with Origin() as origin, Daemon(origin.address, fallback=origin.address, fallback_proxy_protocol=2) as proxy:
+            with proxy.connect() as client:
+                wire = hello() + b"ordinary route"
+                client.sendall(wire)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(wire, all_bytes(client))
+            self.assert_clean_drain(proxy)
+            self.assertEqual(0, proxy.snapshot()["fallback_routed"])
+            if DIAGNOSTICS:
+                values = [event for event in proxy.events() if event.get("event") == "dataplane"][-1]
+                self.assertEqual(0, values["getpeername"])
+                self.assertEqual(0, values["getsockname"])
+
+    def test_selected_backend_failure_never_switches_to_fallback(self):
+        received = []
+        def record(sock):
+            received.append(all_bytes(sock))
+
+        unused = f"127.0.0.1:{free_port()}"
+        with Origin(record) as origin, Daemon(unused, fallback=origin.address, fallback_proxy_protocol=2) as proxy:
+            with proxy.connect() as client:
+                client.sendall(hello())
+                self.assert_closed(client)
+            proxy.wait_for(lambda: proxy.snapshot()["active"] == 0)
+            counts = proxy.snapshot()
+            self.assertEqual(1, counts["connect_failures"])
+            self.assertEqual(0, counts["fallback_routed"])
+            self.assertEqual([], received)
+        with Origin() as origin, Daemon(origin.address, fallback=unused, fallback_proxy_protocol=2) as proxy:
+            with proxy.connect() as client:
+                client.sendall(b"unclassified input")
+                self.assert_closed(client)
+            proxy.wait_for(lambda: proxy.snapshot()["active"] == 0)
+            counts = proxy.snapshot()
+            self.assertEqual(1, counts["routed"])
+            self.assertEqual(1, counts["fallback_routed"])
+            self.assertEqual(1, counts["connect_failures"])
 
     def test_client_half_close_then_backend_reply(self):
         received = []
@@ -726,6 +901,44 @@ class Integration(unittest.TestCase):
                     client.sendall(b"encrypted payload")
                     self.assertEqual(b"encrypted payload", client.recv(1024))
 
+    def test_real_tls_fallback_after_proxy_v2_and_raw_known_route(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert = str(Path(directory) / "cert.pem")
+            key = str(Path(directory) / "key.pem")
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                            "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=example.com"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+            records = []
+            def tls_echo(sock):
+                with server_context.wrap_socket(sock, server_side=True) as encrypted:
+                    encrypted.sendall(encrypted.recv(1024))
+            def framed_tls(sock):
+                records.append(read_proxy_v2(sock))
+                tls_echo(sock)
+
+            with Origin(tls_echo) as normal, Origin(framed_tls) as fallback:
+                with Daemon(normal.address, fallback=fallback.address, fallback_proxy_protocol=2) as proxy:
+                    for name in ("unknown.example.com", None, "example.com"):
+                        with proxy.connect() as client:
+                            expected = proxy_v2_header(client.getsockname(), client.getpeername())
+                            with client_context.wrap_socket(client, server_hostname=name) as encrypted:
+                                payload = b"encrypted application bytes"
+                                encrypted.sendall(payload)
+                                self.assertEqual(payload, exact(encrypted, len(payload)))
+                            if name != "example.com":
+                                self.assertEqual(expected, records[-1])
+                    self.assertEqual(2, len(records))
+                    counts = proxy.snapshot()
+                    self.assertEqual(3, counts["routed"])
+                    self.assertEqual(2, counts["fallback_routed"])
+                    self.assertEqual(1, counts["unknown_sni"])
+                    self.assertEqual(1, counts["missing_sni"])
+
     def test_config_check_and_rejection_before_bind(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -734,12 +947,35 @@ class Integration(unittest.TestCase):
             path.write_text(json.dumps(config), encoding="utf-8")
             result = subprocess.run([BINARY, "--check", str(path)], capture_output=True, timeout=5)
             self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(b"fallback=true fallback_proxy_protocol=0", result.stderr)
+            config["fallback_proxy_protocol"] = 2
+            path.write_text(json.dumps(config), encoding="utf-8")
+            result = subprocess.run([BINARY, "--check", str(path)], capture_output=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(b"fallback=true fallback_proxy_protocol=2", result.stderr)
             config["unexpected_key"] = True
             path.write_text(json.dumps(config), encoding="utf-8")
             result = subprocess.run([BINARY, str(path)], capture_output=True, timeout=5)
             self.assertNotEqual(0, result.returncode)
             self.assertIn(b"invalid config", result.stderr)
             self.assertNotIn(b"listening on", result.stderr)
+
+    def test_invalid_proxy_protocol_settings_fail_before_bind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            base = {"listen": f"127.0.0.1:{free_port()}", "routes": [], "fallback": "127.0.0.1:9444"}
+            invalid = [{**base, "fallback_proxy_protocol": value} for value in (1, 3, -1, 256, True)]
+            invalid += [{"listen": base["listen"], "routes": [{"sni": "example.com", "backend": base["fallback"]}],
+                         "fallback_proxy_protocol": 2},
+                        {**base, "listen": "0.0.0.0:443", "fallback": "127.0.0.1:443", "fallback_proxy_protocol": 2}]
+            for config in invalid:
+                path.write_text(json.dumps(config), encoding="utf-8")
+                for flags in ([], ["--check"]):
+                    with self.subTest(config=config, flags=flags):
+                        result = subprocess.run([BINARY, *flags, str(path)], capture_output=True, timeout=5)
+                        self.assertNotEqual(0, result.returncode)
+                        self.assertIn(b"invalid config", result.stderr)
+                        self.assertNotIn(b"listening on", result.stderr)
 
     def test_self_routes_and_fallback_rejected_before_bind(self):
         with tempfile.TemporaryDirectory() as directory:

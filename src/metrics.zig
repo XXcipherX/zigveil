@@ -86,6 +86,8 @@ pub const Counts = struct {
     accept4: u64 = 0,
     connect: u64 = 0,
     getsockopt: u64 = 0,
+    getpeername: u64 = 0,
+    getsockname: u64 = 0,
     shutdown: u64 = 0,
     close: u64 = 0,
 };

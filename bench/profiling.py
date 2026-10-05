@@ -10,7 +10,7 @@ import subprocess
 
 EVENTS = ("task-clock", "cycles", "instructions", "branches", "branch-misses",
           "cache-references", "cache-misses", "context-switches", "cpu-migrations", "page-faults")
-SYSCALLS = ("recvfrom", "sendto", "splice", "read", "pipe2", "fcntl", "epoll_wait", "epoll_pwait", "epoll_ctl", "accept4", "connect", "getsockopt", "shutdown", "close", "clock_gettime")
+SYSCALLS = ("recvfrom", "sendto", "splice", "read", "pipe2", "fcntl", "epoll_wait", "epoll_pwait", "epoll_ctl", "accept4", "connect", "getsockopt", "getpeername", "getsockname", "shutdown", "close", "clock_gettime")
 
 
 def parse_stat(text):

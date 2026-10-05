@@ -7,7 +7,6 @@ const Pool = @import("pool.zig").Pool;
 const Timers = @import("timers.zig").Timers;
 const Counters = @import("counters.zig").Counters;
 const logging = @import("log.zig");
-const hello_bytes = @import("client_hello.zig").max_wire_bytes;
 const metrics = @import("metrics.zig");
 const relay_pipe = @import("relay_pipe.zig");
 const Slot = struct {
@@ -56,7 +55,7 @@ pub const Server = struct {
         errdefer timers.deinit(allocator);
         const relay_slab = try allocator.alloc(u8, @as(usize, raw.max_connections) * 2 * raw.relay_buffer_bytes);
         errdefer allocator.free(relay_slab);
-        const stage_slab = try allocator.alloc(u8, @as(usize, raw.max_handshakes) * hello_bytes);
+        const stage_slab = try allocator.alloc(u8, @as(usize, raw.max_handshakes) * Config.stageBytes(raw));
         errdefer allocator.free(stage_slab);
         const epoll_rc = linux.epoll_create1(linux.EPOLL.CLOEXEC);
         if (linux.errno(epoll_rc) != .SUCCESS) return error.EpollCreateFailed;
@@ -197,8 +196,15 @@ pub const Server = struct {
                 const timer = self.timers.first() orelse break;
                 if (timer.when > now) break;
                 const conn = &self.slots[timer.slot].conn;
-                conn.expire(self.config.raw.value, now, &self.counts);
-                if (conn.state == .closed) self.drop(timer.slot) else self.timers.set(timer.slot, conn.deadline(self.config.raw.value));
+                const old_state = conn.state;
+                conn.expire(&self.io, self.config, now, &self.counts);
+                if (conn.state == .closed) {
+                    self.drop(timer.slot);
+                } else if (conn.state != old_state) {
+                    // A hello deadline can select fallback and create a backend.
+                    conn.drive(&self.io, self.config, now, false, &self.counts);
+                    try self.reconcile(timer.slot);
+                } else self.timers.set(timer.slot, conn.deadline(self.config.raw.value));
             }
             if (!self.listener_registered and self.stop_deadline_ms == null and now >= self.accept_resume_ms) {
                 try control(self.epoll, linux.EPOLL.CTL_ADD, self.listener, linux.EPOLL.IN, 0, &self.io.metrics);
@@ -243,10 +249,11 @@ pub const Server = struct {
             };
             const index = self.pool.acquire().?;
             const staging = self.stages.acquire().?;
+            const stage_bytes = Config.stageBytes(self.config.raw.value);
             const bytes = self.config.raw.value.relay_buffer_bytes;
             const start = @as(usize, index) * 2 * bytes;
             self.slots[index] = .{
-                .conn = Connection.init(fd, self.stage_slab[@as(usize, staging) * hello_bytes ..][0..hello_bytes], self.relay_slab[start..][0..bytes], self.relay_slab[start + bytes ..][0..bytes], now),
+                .conn = Connection.init(fd, self.stage_slab[@as(usize, staging) * stage_bytes ..][0..stage_bytes], self.relay_slab[start..][0..bytes], self.relay_slab[start + bytes ..][0..bytes], now),
                 .staging = staging,
             };
             self.counts.active += 1;

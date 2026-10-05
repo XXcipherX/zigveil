@@ -8,6 +8,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const outcome = @import("io_result.zig");
 const metrics = @import("metrics.zig");
 const relay_pipe = @import("relay_pipe.zig");
+const proxy_protocol = @import("proxy_protocol.zig");
 pub const relay_byte_budget = 262144;
 const relay_call_budget = 128;
 const bulk_read_bytes = 16384;
@@ -16,7 +17,7 @@ const short_read_limit = 32;
 
 pub const Connect = struct { fd: i32, complete: bool };
 pub const State = enum { hello, connecting, relaying, closed };
-pub const CloseReason = enum { complete, invalid_hello, no_route, connect_failed, io_error, timeout, stopping };
+pub const CloseReason = enum { complete, invalid_hello, no_route, connect_failed, proxy_metadata_failed, io_error, timeout, stopping };
 pub const Direction = struct {
     buffer: Buffer,
     eof: bool = false,
@@ -46,6 +47,7 @@ pub const Connection = struct {
     stage: ?[]u8,
     stage_len: usize = 0,
     stage_sent: usize = 0,
+    proxy_header_remaining: u8 = 0,
     to_backend: Direction,
     to_client: Direction,
     entered_ms: u64,
@@ -84,8 +86,18 @@ pub const Connection = struct {
         };
     }
 
-    pub fn expire(self: *Connection, limits: config_mod.Raw, now: u64, counts: *Counters) void {
-        if (self.deadline(limits)) |when| if (now >= when) {
+    pub fn expire(self: *Connection, io: anytype, config: *const Config, now: u64, counts: *Counters) void {
+        if (self.deadline(config.raw.value)) |when| if (now >= when) {
+            if (self.state == .hello and self.stage_len != 0) {
+                if (config.fallback) |endpoint| {
+                    // A pending transport error must not become routing fallback.
+                    self.checkSocketError(io, false, counts);
+                    if (self.state == .closed) return;
+                    counts.timeouts +%= 1;
+                    self.startBackend(io, config, endpoint, true, now, counts);
+                    return;
+                }
+            }
             counts.timeouts +%= 1;
             self.close(.timeout);
         };
@@ -103,7 +115,7 @@ pub const Connection = struct {
             else
                 io.metrics.add("drive_no_progress", 1);
         };
-        self.expire(config.raw.value, now, counts);
+        self.expire(io, config, now, counts);
         if (self.state == .closed) return;
         if (self.state == .hello) self.inspect(io, config, now, counts);
         if (self.state == .connecting) {
@@ -158,10 +170,11 @@ pub const Connection = struct {
 
     fn inspect(self: *Connection, io: anytype, config: *const Config, now: u64, counts: *Counters) void {
         const stage = self.stage.?;
+        const inspect_limit = @min(stage.len, hello.max_wire_bytes);
         var calls: usize = 0;
         while (calls < 64) : (calls += 1) {
-            if (self.stage_len == stage.len) break;
-            const n = switch (io.recv(self.client, stage[self.stage_len..])) {
+            if (self.stage_len == inspect_limit) break;
+            const n = switch (io.recv(self.client, stage[self.stage_len..inspect_limit])) {
                 .ok => |n| n,
                 .err => |err| {
                     if (err == .AGAIN) return;
@@ -169,7 +182,14 @@ pub const Connection = struct {
                     return;
                 },
             };
-            if (n == 0) break;
+            if (n == 0) {
+                if (self.stage_len == 0) {
+                    self.close(.complete);
+                    return;
+                }
+                self.to_backend.eof = true;
+                break;
+            }
             self.stage_len += n;
             switch (hello.parse(stage[0..self.stage_len])) {
                 .need_more => continue,
@@ -177,6 +197,7 @@ pub const Connection = struct {
                 .ok => |maybe_name| {
                     const name = maybe_name;
                     var destination = config.lookup(if (name) |*value| value else null);
+                    const fallback = destination == null;
                     if (destination == null) {
                         if (name == null) counts.missing_sni +%= 1 else counts.unknown_sni +%= 1;
                         destination = config.fallback;
@@ -185,24 +206,55 @@ pub const Connection = struct {
                         self.close(.no_route);
                         return;
                     };
-                    counts.routed +%= 1;
-                    const connecting = io.startConnect(endpoint) catch {
-                        counts.connect_failures +%= 1;
-                        self.close(.connect_failed);
-                        return;
-                    };
-                    self.backend = connecting.fd;
-                    self.entered_ms = now;
-                    self.activity_ms = now;
-                    self.state = if (connecting.complete) .relaying else .connecting;
+                    self.startBackend(io, config, endpoint, fallback, now, counts);
                     return;
                 },
             }
         }
         // A fairness yield is different from incomplete data at the cap/EOF.
-        if (calls == 64 and self.stage_len < stage.len) return;
+        if (calls == 64 and self.stage_len < inspect_limit) return;
         counts.invalid_client_hello +%= 1;
-        self.close(.invalid_hello);
+        if (config.fallback) |endpoint|
+            self.startBackend(io, config, endpoint, true, now, counts)
+        else
+            self.close(.invalid_hello);
+    }
+
+    fn startBackend(self: *Connection, io: anytype, config: *const Config, endpoint: config_mod.Address, fallback: bool, now: u64, counts: *Counters) void {
+        counts.routed +%= 1;
+        if (fallback) {
+            counts.fallback_routed +%= 1;
+            if (config.raw.value.fallback_proxy_protocol == 2) {
+                var header: [proxy_protocol.max_header_bytes]u8 = undefined;
+                const n = switch (io.prepareProxyHeader(self.client, &header)) {
+                    .ok => |n| n,
+                    .err => |err| {
+                        self.failIo(.client, .socket_error, .{ .errno = err }, counts);
+                        return;
+                    },
+                    .unsupported => {
+                        counts.rejected +%= 1;
+                        self.close(.proxy_metadata_failed);
+                        return;
+                    },
+                };
+                const stage = self.stage.?;
+                std.debug.assert(stage.len - self.stage_len >= n);
+                @memmove(stage[n..][0..self.stage_len], stage[0..self.stage_len]);
+                @memcpy(stage[0..n], header[0..n]);
+                self.stage_len += n;
+                self.proxy_header_remaining = n;
+            }
+        }
+        const connecting = io.startConnect(endpoint) catch {
+            counts.connect_failures +%= 1;
+            self.close(.connect_failed);
+            return;
+        };
+        self.backend = connecting.fd;
+        self.entered_ms = now;
+        self.activity_ms = now;
+        self.state = if (connecting.complete) .relaying else .connecting;
     }
 
     fn pump(self: *Connection, io: anytype, direction: *Direction, source: i32, target: i32, forward: bool, now: u64, counts: *Counters) bool {
@@ -249,7 +301,13 @@ pub const Connection = struct {
                     return false;
                 }
                 if (n != 0) {
+                    var payload_bytes = n;
                     if (has_prefix) {
+                        if (self.proxy_header_remaining != 0) {
+                            const header_bytes = @min(n, self.proxy_header_remaining);
+                            self.proxy_header_remaining -= @intCast(header_bytes);
+                            payload_bytes -= header_bytes;
+                        }
                         self.stage_sent += n;
                         if (self.stage_sent == self.stage_len) {
                             self.stage = null;
@@ -264,7 +322,7 @@ pub const Connection = struct {
                         if (metrics.enabled and n == direction.buffer.len) io.metrics.add("ring_drained", 1);
                         direction.buffer.consumed(n);
                     }
-                    if (forward) counts.bytes_client_to_backend +%= n else counts.bytes_backend_to_client +%= n;
+                    if (forward) counts.bytes_client_to_backend +%= payload_bytes else counts.bytes_backend_to_client +%= n;
                     self.activity_ms = now;
                     sent += n;
                     progress = true;

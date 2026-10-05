@@ -6,6 +6,7 @@ const Counters = @import("counters.zig").Counters;
 const fixture = @import("test_hello.zig");
 const outcome = @import("io_result.zig");
 const relay_pipe = @import("relay_pipe.zig");
+const proxy_protocol = @import("proxy_protocol.zig");
 
 const FakePipe = struct { data: [65536]u8 = undefined, len: usize = 0 };
 
@@ -16,6 +17,7 @@ const Endpoint = struct {
     length: usize = 0,
     max_read: usize = 65536,
     max_write: usize = 65536,
+    writes_left: ?usize = null,
     eof: bool = false,
     blocked: bool = false,
     read_error: ?outcome.Errno = null,
@@ -35,6 +37,12 @@ const Fake = struct {
     immediate: bool = true,
     connects: usize = 0,
     completions: usize = 0,
+    destination: ?Address = null,
+    proxy_queries: usize = 0,
+    proxy_error: ?outcome.Errno = null,
+    proxy_unsupported: bool = false,
+    peer: Address = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 9 }, .port = 4660 } },
+    local: Address = .{ .ip4 = .{ .bytes = .{ 198, 51, 100, 7 }, .port = 443 } },
     use_pipes: bool = false,
     pipes: [2]FakePipe = .{ .{}, .{} },
     open_attempts: usize = 0,
@@ -66,10 +74,11 @@ const Fake = struct {
     pub fn send(self: *Fake, fd: i32, bytes: []const u8) outcome.Result(usize) {
         const e = self.endpoint(fd);
         if (e.write_error) |err| return .{ .err = err };
-        if (e.blocked) return .{ .err = .AGAIN };
+        if (e.blocked or e.writes_left == 0) return .{ .err = .AGAIN };
         const n = @min(bytes.len, @min(e.max_write, e.output.len - e.length));
         @memcpy(e.output[e.length..][0..n], bytes[0..n]);
         e.length += n;
+        if (e.writes_left) |*left| left.* -= 1;
         return .{ .ok = n };
     }
 
@@ -85,8 +94,17 @@ const Fake = struct {
         return if (e.socket_error) |err| .{ .err = err } else .{ .ok = {} };
     }
 
-    pub fn startConnect(self: *Fake, _: Address) !engine.Connect {
+    pub fn prepareProxyHeader(self: *Fake, fd: i32, header: *[proxy_protocol.max_header_bytes]u8) proxy_protocol.PrepareResult {
+        std.debug.assert(fd == 1);
+        self.proxy_queries += 1;
+        if (self.proxy_error) |err| return .{ .err = err };
+        if (self.proxy_unsupported) return .unsupported;
+        return .{ .ok = proxy_protocol.encode(header, self.peer, self.local) catch return .unsupported };
+    }
+
+    pub fn startConnect(self: *Fake, destination: Address) !engine.Connect {
         self.connects += 1;
+        self.destination = destination;
         if (self.connect_failed) return error.ConnectFailed;
         return .{ .fd = 2, .complete = self.immediate };
     }
@@ -152,7 +170,7 @@ const Fake = struct {
 };
 
 const Rig = struct {
-    stage: [65536]u8 = undefined,
+    stage: [65536 + proxy_protocol.max_header_bytes]u8 = undefined,
     input: [65536]u8 = undefined,
     forward: [32]u8 = undefined,
     reverse: [32]u8 = undefined,
@@ -516,6 +534,7 @@ test "uneven large splice reads stop at the byte quantum without forcing a copie
     rig.io.client.eof = true;
     rig.io.backend.input = "independent reply";
     rig.io.backend.eof = true;
+    rig.now = 3;
     rig.drive(&config, 1);
     try std.testing.expectEqual(@as(usize, engine.relay_byte_budget), rig.io.backend.length);
     try std.testing.expectEqual(@as(usize, engine.relay_byte_budget), rig.io.client.offset);
@@ -674,24 +693,24 @@ test "absolute hello, connect, prefix and idle deadlines; idle can be disabled" 
         var rig: Rig = .{};
         rig.init(.{});
         rig.conn.state = state;
-        rig.conn.expire(config.raw.value, 4999, &rig.counts);
+        rig.conn.expire(&rig.io, &config, 4999, &rig.counts);
         try std.testing.expect(rig.conn.state != .closed);
-        rig.conn.expire(config.raw.value, 5000, &rig.counts);
+        rig.conn.expire(&rig.io, &config, 5000, &rig.counts);
         try std.testing.expectEqual(engine.CloseReason.timeout, rig.conn.reason);
-        rig.conn.expire(config.raw.value, 6000, &rig.counts);
+        rig.conn.expire(&rig.io, &config, 6000, &rig.counts);
         try std.testing.expectEqual(@as(u64, 1), rig.counts.timeouts);
     }
     var idle: Rig = .{};
     idle.relay();
-    idle.conn.expire(config.raw.value, 300000, &idle.counts);
+    idle.conn.expire(&idle.io, &config, 300000, &idle.counts);
     try std.testing.expectEqual(engine.CloseReason.timeout, idle.conn.reason);
     idle.relay();
     config.raw.value.idle_timeout_ms = 0;
-    idle.conn.expire(config.raw.value, 9_000_000, &idle.counts);
+    idle.conn.expire(&idle.io, &config, 9_000_000, &idle.counts);
     try std.testing.expectEqual(engine.State.relaying, idle.conn.state);
 }
 
-test "unknown and missing SNI reject, malformed input never takes fallback" {
+test "unknown and missing SNI reject without fallback and select fallback when configured" {
     var config = try testConfig();
     defer config.deinit(std.testing.allocator);
     for ([_]?[]const u8{ "example.org", null }) |name| {
@@ -702,22 +721,148 @@ test "unknown and missing SNI reject, malformed input never takes fallback" {
         try std.testing.expectEqual(@as(usize, 0), rig.io.connects);
     }
     config.fallback = try Address.parseLiteral("127.0.0.1:9444");
-    var fallback: Rig = .{};
-    fallback.init(.{ .name = "example.org" });
-    fallback.drive(&config, 1);
-    try std.testing.expectEqual(@as(usize, 1), fallback.io.connects);
-    var invalid: Rig = .{};
-    invalid.init(.{});
-    invalid.input[0] = 23;
-    invalid.drive(&config, 1);
-    try std.testing.expectEqual(engine.CloseReason.invalid_hello, invalid.conn.reason);
-    try std.testing.expectEqual(@as(usize, 0), invalid.io.connects);
-    var truncated: Rig = .{};
-    truncated.init(.{});
-    truncated.io.client.input = truncated.input[0..15];
-    truncated.io.client.eof = true;
-    truncated.drive(&config, 1);
-    try std.testing.expectEqual(engine.CloseReason.invalid_hello, truncated.conn.reason);
+    for ([_]?[]const u8{ "example.org", null }) |name| {
+        var rig: Rig = .{};
+        rig.init(.{ .name = name });
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+        try std.testing.expect(std.meta.eql(config.fallback.?, rig.io.destination.?));
+        try std.testing.expectEqual(@as(u64, 1), rig.counts.fallback_routed);
+        try std.testing.expectEqualSlices(u8, rig.io.client.input, rig.io.backend.output[0..rig.io.backend.length]);
+    }
+}
+
+test "malformed framing, non-TLS, record limits and partial EOF preserve fallback input" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    for ([_]bool{ false, true }) |enabled| for (0..7) |case| {
+        config.fallback = if (enabled) try Address.parseLiteral("127.0.0.1:9444") else null;
+        var rig: Rig = .{};
+        rig.init(.{});
+        switch (case) {
+            0 => rig.input[0] = 23,
+            1 => rig.input[5] = 2,
+            2 => rig.io.client.input = "GET / HTTP/1.1\r\n\r\n",
+            3 => rig.io.client.input = "\x16\x03\x01\xff\xff",
+            4 => rig.io.client.input = fixture.make(&rig.input, .{ .fragment_bytes = 1 }),
+            5 => rig.io.client.input = fixture.make(&rig.input, .{ .duplicate_sni = true }),
+            6 => {
+                rig.io.client.input = rig.input[0..15];
+                rig.io.client.eof = true;
+            },
+            else => unreachable,
+        }
+        const wire = rig.io.client.input;
+        rig.io.backend.max_write = 3;
+        rig.drive(&config, 16);
+        try std.testing.expectEqual(@as(u64, 1), rig.counts.invalid_client_hello);
+        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), rig.counts.fallback_routed);
+        if (enabled) {
+            try std.testing.expectEqualSlices(u8, wire, rig.io.backend.output[0..rig.io.backend.length]);
+            try std.testing.expectEqual(case == 6, rig.conn.to_backend.fin);
+            try std.testing.expectEqual(@as(u64, wire.len), rig.counts.bytes_client_to_backend);
+        } else {
+            try std.testing.expectEqual(engine.CloseReason.invalid_hello, rig.conn.reason);
+            try std.testing.expectEqual(@as(usize, 0), rig.io.connects);
+        }
+    };
+}
+
+test "over-limit wire input uses only the bounded inspection prefix then the ordinary relay" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.fallback_proxy_protocol = 2;
+    var input: [65541]u8 = undefined;
+    const wire = fixture.make(&input, .{ .handshake_bytes = 65516, .fragment_bytes = 16000 });
+    for ([_]bool{ false, true }) |ipv6| {
+        var rig: Rig = .{};
+        rig.init(.{});
+        if (ipv6) {
+            rig.io.peer = try Address.parseLiteral("[2001:db8::9]:4660");
+            rig.io.local = try Address.parseLiteral("[2001:db8::7]:443");
+        }
+        const header_bytes: usize = if (ipv6) 52 else 28;
+        rig.io.client.input = wire;
+        rig.io.backend.blocked = true;
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(@as(usize, 65536), rig.io.client.offset);
+        try std.testing.expectEqual(65536 + header_bytes, rig.conn.stage_len);
+        try std.testing.expectEqual(@as(u64, 1), rig.counts.invalid_client_hello);
+        rig.io.backend.blocked = false;
+        rig.drive(&config, 4);
+        try std.testing.expect(rig.conn.stage == null);
+        try std.testing.expectEqualSlices(u8, wire, rig.io.backend.output[header_bytes..rig.io.backend.length]);
+        try std.testing.expectEqual(@as(u64, wire.len), rig.counts.bytes_client_to_backend);
+    }
+}
+
+test "partial hello deadline selects bounded fallback once, empty EOF and timeout never connect" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.idle_timeout_ms = 0;
+    for ([_]bool{ false, true }) |partial| for ([_]bool{ false, true }) |eof| {
+        var rig: Rig = .{};
+        rig.init(.{});
+        rig.io.client.input = rig.input[0..if (partial) @as(usize, 15) else 0];
+        rig.io.client.eof = eof;
+        rig.io.backend.blocked = true;
+        rig.drive(&config, 1);
+        rig.now = 5000;
+        rig.drive(&config, 1);
+        if (partial) {
+            try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+            try std.testing.expectEqual(@as(u64, 1), rig.counts.fallback_routed);
+            try std.testing.expectEqual(@as(u64, if (eof) 0 else 1), rig.counts.timeouts);
+            try std.testing.expectEqual(@as(u64, if (eof) 1 else 0), rig.counts.invalid_client_hello);
+            try std.testing.expect(!rig.conn.to_backend.fin);
+            try std.testing.expectEqual(@as(?u64, if (eof) 5001 else 10000), rig.conn.deadline(config.raw.value));
+            rig.now = if (eof) 5001 else 10000;
+            rig.drive(&config, 1);
+            try std.testing.expectEqual(engine.CloseReason.timeout, rig.conn.reason);
+            try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), rig.io.connects);
+            try std.testing.expectEqual(if (eof) engine.CloseReason.complete else .timeout, rig.conn.reason);
+            try std.testing.expectEqual(@as(u64, 0), rig.counts.invalid_client_hello);
+        }
+    };
+}
+
+test "fallback does not hide transport errors or retry failed selected backends" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    for (0..3) |case| {
+        var rig: Rig = .{};
+        rig.init(.{});
+        rig.io.client.input = rig.input[0..15];
+        if (case == 0) rig.io.client.read_error = .CONNRESET;
+        // Pending socket failure at the partial hello deadline is fatal too.
+        if (case != 0) {
+            rig.io.client.socket_error = .CONNRESET;
+            if (case == 1) rig.conn.checkSocketError(&rig.io, false, &rig.counts);
+        }
+        rig.drive(&config, 1);
+        rig.now = 5000;
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(engine.CloseReason.io_error, rig.conn.reason);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.connects);
+        try expectIoConsistent(rig.counts);
+    }
+    for ([_]bool{ false, true }) |unknown| for ([_]bool{ false, true }) |async_connect| {
+        var rig: Rig = .{};
+        rig.init(.{ .name = if (unknown) "example.org" else "example.com" });
+        rig.io.immediate = !async_connect;
+        rig.io.connect_failed = !async_connect;
+        rig.io.finish_failed = async_connect;
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(engine.CloseReason.connect_failed, rig.conn.reason);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+        try std.testing.expectEqual(@as(u64, if (unknown) 1 else 0), rig.counts.fallback_routed);
+        try std.testing.expect(std.meta.eql(if (unknown) config.fallback.? else config.routes[0].backend, rig.io.destination.?));
+    };
 }
 
 test "maximum staged prefix is sent without copying into small relay buffers" {
@@ -729,6 +874,170 @@ test "maximum staged prefix is sent without copying into small relay buffers" {
     rig.drive(&config, 100);
     try std.testing.expect(rig.conn.stage == null);
     try std.testing.expectEqualSlices(u8, rig.io.client.input, rig.io.backend.output[0..rig.io.backend.length]);
+}
+
+test "known SNI remains raw even when fallback shares its endpoint and PROXY v2 is enabled" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = config.routes[0].backend;
+    config.raw.value.fallback_proxy_protocol = 2;
+    var rig: Rig = .{};
+    rig.init(.{});
+    rig.io.proxy_error = .CONNRESET;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.proxy_queries);
+    try std.testing.expectEqual(@as(u64, 0), rig.counts.fallback_routed);
+    try std.testing.expectEqual(@as(u8, 0), rig.conn.proxy_header_remaining);
+    try std.testing.expectEqualSlices(u8, rig.io.client.input, rig.io.backend.output[0..rig.io.backend.length]);
+    try std.testing.expectEqual(@as(u64, rig.io.client.input.len), rig.counts.bytes_client_to_backend);
+}
+
+test "PROXY debt precedes partial EOF prefix across async connect, EAGAIN, partial sends and independent reply" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.fallback_proxy_protocol = 2;
+    var rig: Rig = .{};
+    rig.init(.{});
+    const prefix = rig.input[0..15];
+    rig.io.client.input = prefix;
+    rig.io.client.eof = true;
+    rig.io.immediate = false;
+    rig.io.backend.blocked = true;
+    rig.conn.drive(&rig.io, &config, 1, false, &rig.counts);
+    try std.testing.expectEqual(engine.State.connecting, rig.conn.state);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.completions);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.backend.length);
+    rig.conn.drive(&rig.io, &config, 2, false, &rig.counts);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.completions);
+    rig.io.backend.input = "independent reply";
+    rig.io.backend.eof = true;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.completions);
+    try std.testing.expectEqualStrings("independent reply", rig.io.client.output[0..rig.io.client.length]);
+    try std.testing.expect(rig.conn.to_client.fin);
+    try std.testing.expect(!rig.conn.to_backend.fin);
+    try std.testing.expect(rig.conn.interest(true).write);
+    try std.testing.expect(!rig.conn.interest(false).read);
+    rig.io.backend.blocked = false;
+    rig.io.backend.max_write = 3;
+    rig.io.backend.writes_left = 1;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 3), rig.conn.stage_sent);
+    try std.testing.expectEqual(@as(u64, 0), rig.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.backend.fins);
+    rig.io.backend.max_write = 26;
+    rig.io.backend.writes_left = 1;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 29), rig.conn.stage_sent);
+    try std.testing.expectEqual(@as(u64, 1), rig.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.backend.fins);
+    rig.io.backend.max_write = 2;
+    rig.io.backend.writes_left = null;
+    rig.drive(&config, 1);
+    try std.testing.expectEqualSlices(u8, "\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x0c\xc0\x00\x02\x09\xc6\x33\x64\x07\x12\x34\x01\xbb", rig.io.backend.output[0..28]);
+    try std.testing.expectEqualSlices(u8, prefix, rig.io.backend.output[28..rig.io.backend.length]);
+    try std.testing.expectEqual(@as(u64, prefix.len), rig.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.proxy_queries);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.backend.fins);
+    try std.testing.expect(rig.conn.stage == null);
+    try std.testing.expectEqual(engine.CloseReason.complete, rig.conn.reason);
+    try std.testing.expectEqual(engine.State.closed, rig.conn.state);
+}
+
+test "partial hello timeout with PROXY v2 sends its bytes once and permits later client data" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.fallback_proxy_protocol = 2;
+    var rig: Rig = .{};
+    rig.init(.{});
+    const prefix = rig.input[0..15];
+    rig.io.client.input = prefix;
+    rig.drive(&config, 1);
+    rig.now = 5000;
+    rig.drive(&config, 1);
+    try std.testing.expectEqualSlices(u8, prefix, rig.io.backend.output[28..rig.io.backend.length]);
+    rig.io.client.input = "later opaque bytes";
+    rig.io.client.offset = 0;
+    rig.drive(&config, 4);
+    try std.testing.expectEqualSlices(u8, prefix, rig.io.backend.output[28..][0..prefix.len]);
+    try std.testing.expectEqualStrings("later opaque bytes", rig.io.backend.output[28 + prefix.len .. rig.io.backend.length]);
+    try std.testing.expectEqual(@as(u64, prefix.len + rig.io.client.input.len), rig.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(u64, 1), rig.counts.timeouts);
+    try std.testing.expectEqual(@as(u64, 0), rig.counts.invalid_client_hello);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.proxy_queries);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+}
+
+test "PROXY metadata errors and header write reset close once without retry or stale pooled state" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.fallback_proxy_protocol = 2;
+    for (0..4) |fault| {
+        var rig: Rig = .{};
+        rig.init(.{ .name = "example.org" });
+        switch (fault) {
+            0 => rig.io.proxy_error = .BADF,
+            1 => rig.io.proxy_unsupported = true,
+            2 => rig.io.local = try Address.parseLiteral("[2001:db8::7]:443"),
+            3 => {
+                rig.io.backend.max_write = 3;
+                rig.io.backend.writes_left = 1;
+            },
+            else => unreachable,
+        }
+        rig.drive(&config, 1);
+        if (fault == 3) {
+            rig.io.backend.write_error = .CONNRESET;
+            rig.drive(&config, 1);
+            try expectIoEvent(rig.counts, "backend_write_errors", "connection_resets");
+            try std.testing.expectEqual(@as(usize, 3), rig.io.backend.length);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), rig.io.connects);
+            if (fault == 0) try expectIoEvent(rig.counts, "client_socket_errors", "other_io_errors") else {
+                try std.testing.expectEqual(@as(u64, 1), rig.counts.rejected);
+                try std.testing.expectEqual(engine.CloseReason.proxy_metadata_failed, rig.conn.reason);
+                try std.testing.expectEqual(@as(u64, 0), rig.counts.io_errors);
+            }
+        }
+        try std.testing.expectEqual(engine.State.closed, rig.conn.state);
+        try std.testing.expectEqual(@as(u64, 0), rig.counts.bytes_client_to_backend);
+        rig.io = .{};
+        rig.counts = .{};
+        rig.init(.{});
+        try std.testing.expectEqual(@as(u8, 0), rig.conn.proxy_header_remaining);
+        try std.testing.expectEqual(@as(usize, 0), rig.conn.stage_sent);
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.proxy_queries);
+        try std.testing.expectEqualSlices(u8, rig.io.client.input, rig.io.backend.output[0..rig.io.backend.length]);
+    }
+}
+
+test "PROXY connect and blocked prefix deadlines stay absolute with established idle disabled" {
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    config.fallback = try Address.parseLiteral("127.0.0.1:9444");
+    config.raw.value.fallback_proxy_protocol = 2;
+    config.raw.value.connect_timeout_ms = 250;
+    config.raw.value.idle_timeout_ms = 0;
+    for ([_]bool{ false, true }) |immediate| {
+        var rig: Rig = .{};
+        rig.init(.{ .name = "example.org" });
+        rig.io.immediate = immediate;
+        rig.io.backend.blocked = true;
+        rig.conn.drive(&rig.io, &config, 1, false, &rig.counts);
+        try std.testing.expect(rig.conn.stage != null);
+        rig.conn.drive(&rig.io, &config, 251, false, &rig.counts);
+        try std.testing.expectEqual(engine.CloseReason.timeout, rig.conn.reason);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.proxy_queries);
+        try std.testing.expectEqual(@as(u64, 1), rig.counts.timeouts);
+        try std.testing.expectEqual(@as(u64, 0), rig.counts.io_errors);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.backend.length);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.backend.fins);
+    }
 }
 
 test "ENOTCONN finishes only a drained half and preserves reverse buffered data" {

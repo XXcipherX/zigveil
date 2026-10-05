@@ -7,6 +7,7 @@ pub const Counters = struct {
     accepted: u64 = 0,
     active: u64 = 0,
     routed: u64 = 0,
+    fallback_routed: u64 = 0,
     unknown_sni: u64 = 0,
     missing_sni: u64 = 0,
     invalid_client_hello: u64 = 0,

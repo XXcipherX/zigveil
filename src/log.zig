@@ -113,7 +113,7 @@ pub const Logger = struct {
         });
         const Group = struct { title: []const u8, fields: []const []const u8 };
         inline for ([_]Group{
-            .{ .title = "routing", .fields = &.{ "unknown_sni", "missing_sni", "invalid_client_hello" } },
+            .{ .title = "routing", .fields = &.{ "fallback_routed", "unknown_sni", "missing_sni", "invalid_client_hello" } },
             .{ .title = "failures", .fields = &.{ "connect_failures", "timeouts", "rejected", "accept_errors" } },
             .{ .title = "socket causes", .fields = &.{ "io_errors", "connection_resets", "broken_pipes", "not_connected", "connection_aborts", "socket_timeouts", "network_errors", "other_io_errors", "zero_writes" } },
             .{ .title = "client socket", .fields = &.{ "client_read_errors", "client_write_errors", "client_shutdown_errors", "client_socket_errors" } },
@@ -181,7 +181,7 @@ fn group(comptime title: []const u8, counts: Counters, comptime fields: []const 
 fn activity(counts: Counters) Message {
     var body: Message = .{};
     body.append("active={d}", .{counts.active});
-    inline for (.{ "accepted", "routed", "closed" }) |field_name| {
+    inline for (.{ "accepted", "routed", "fallback_routed", "closed" }) |field_name| {
         if (@field(counts, field_name) != 0) body.append(" " ++ field_name ++ "={d}", .{@field(counts, field_name)});
     }
     if (counts.bytes_client_to_backend != 0) body.append(" sent={f}", .{Bytes{ .value = counts.bytes_client_to_backend }});

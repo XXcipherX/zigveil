@@ -46,6 +46,11 @@ is accessed via a live pointer, and connection slices reference stable server sl
 
 Raw sockaddr ports are network byte order; IPv4 bytes must preserve their memory
 layout. IPv6 flow/scope are zero because scoped literals are unsupported.
+getpeername/getsockname take `*sockaddr` and `*socklen_t`; initialize storage/length
+for each attempt, retry EINTR, validate returned family/length before casting.
+PROXY v2 uses the accepted socket's peer and local endpoint, including actual
+wildcard destination. Native sockaddr storage is aligned; preserve IPv4 memory
+bytes with toBytes when decoding. Never substitute the configured backend address.
 Zig 0.17 `@bitCast` uses logical bits, independent of byte order. Use
 `std.mem.bytesToValue` for IPv4 sockaddr memory bytes, not an array-to-integer cast.
 The remaining signed/unsigned scalar bitcasts only encode negative syscall errno

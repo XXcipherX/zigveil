@@ -9,6 +9,7 @@ pub const Raw = struct {
     listen: []const u8,
     routes: []const struct { sni: []const u8, backend: []const u8 },
     fallback: ?[]const u8 = null,
+    fallback_proxy_protocol: u8 = 0,
     max_connections: u32 = 1024,
     max_handshakes: u32 = 64,
     relay_buffer_bytes: u32 = 65536,
@@ -39,6 +40,8 @@ pub const Config = struct {
         const parsed = try std.json.parseFromSlice(Raw, allocator, bytes, .{});
         errdefer parsed.deinit();
         const raw = parsed.value;
+        if (raw.fallback_proxy_protocol != 0 and raw.fallback_proxy_protocol != 2) return error.FallbackProxyProtocolMustBeZeroOrTwo;
+        if (raw.fallback_proxy_protocol != 0 and raw.fallback == null) return error.ProxyProtocolRequiresFallback;
         if (raw.max_connections == 0 or raw.max_connections > 65536) return error.MaxConnectionsOutOfRange;
         if (raw.max_handshakes == 0 or raw.max_handshakes > raw.max_connections) return error.MaxHandshakesOutOfRange;
         const n = raw.relay_buffer_bytes;
@@ -84,7 +87,11 @@ pub const Config = struct {
     }
 
     pub fn bufferBytes(raw: Raw) u64 {
-        return @as(u64, raw.max_connections) * 2 * raw.relay_buffer_bytes + @as(u64, raw.max_handshakes) * hello_bytes;
+        return @as(u64, raw.max_connections) * 2 * raw.relay_buffer_bytes + @as(u64, raw.max_handshakes) * stageBytes(raw);
+    }
+
+    pub fn stageBytes(raw: Raw) usize {
+        return hello_bytes + @as(usize, if (raw.fallback_proxy_protocol == 2) @import("proxy_protocol.zig").max_header_bytes else 0);
     }
 };
 
@@ -162,6 +169,39 @@ test "reject unknown keys, duplicate routes, invalid endpoints and resource limi
     };
     for (inputs) |input| {
         if (Config.parse(std.testing.allocator, input)) |value| {
+            var unexpected = value;
+            unexpected.deinit(std.testing.allocator);
+            return error.ExpectedConfigRejection;
+        } else |_| {}
+    }
+}
+
+test "PROXY v2 is optional, requires fallback and reserves only bounded staging headroom" {
+    var config = try Config.parse(std.testing.allocator,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"127.0.0.1:9444","fallback_proxy_protocol":2}
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, hello_bytes + 52), Config.stageBytes(config.raw.value));
+    try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024 + 64 * 52), Config.bufferBytes(config.raw.value));
+    config.raw.value.fallback_proxy_protocol = 0;
+    try std.testing.expectEqual(@as(usize, hello_bytes), Config.stageBytes(config.raw.value));
+    try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024), Config.bufferBytes(config.raw.value));
+    const invalid = [_][]const u8{
+        \\{"listen":"0.0.0.0:443","routes":[{"sni":"example.com","backend":"127.0.0.1:9443"}],"fallback_proxy_protocol":2}
+        ,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"127.0.0.1:9444","fallback_proxy_protocol":1}
+        ,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"127.0.0.1:9444","fallback_proxy_protocol":3}
+        ,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"127.0.0.1:9444","fallback_proxy_protocol":true}
+        ,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"127.0.0.1:443","fallback_proxy_protocol":2}
+        ,
+        \\{"listen":"0.0.0.0:443","routes":[],"fallback":"[::ffff:127.0.0.1]:443","fallback_proxy_protocol":2}
+        ,
+    };
+    for (invalid) |json| {
+        if (Config.parse(std.testing.allocator, json)) |value| {
             var unexpected = value;
             unexpected.deinit(std.testing.allocator);
             return error.ExpectedConfigRejection;
