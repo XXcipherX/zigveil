@@ -405,10 +405,10 @@ stay visible even with log_level none; this preserves actionable preflight failu
 ## Measurement and compile-time diagnostics
 
 The optional `-Ddataplane_metrics=true` build records syscall outcomes, pump exits,
-readiness batches, duplicate dispatch opportunities and interest transitions.
+readiness batches and interest transitions.
 `linux_io.Io` owns its single-threaded counters; snapshots are emitted only on
 SIGUSR1 as a separate `event: dataplane` JSON object. Ordinary builds use a zero-size
-metrics type and compile out updates and batch bookkeeping. Production stats and
+metrics type and compile out counter updates. Production stats and
 logging retain their existing schema and behavior. There are no per-packet clocks,
 strings, allocation, atomics or locks in this instrumentation.
 
@@ -426,7 +426,7 @@ spill. send_zc would introduce page/notification lifetime bookkeeping; multishot
 recv would change buffer ownership and queue handling. Alternative submission
 or event-loop designs require a measured bottleneck and paired verification.
 
-## Performance decisions and measured rejected ideas
+## Dataplane choices
 
 The retained dataplane uses 64 KiB rings, two process-owned pipes, a 256 KiB/128-call
 quantum per direction and adaptive return to buffered I/O for short messages.
@@ -436,27 +436,17 @@ on every exit; `assertPipesReturned` verifies this before a slot is recycled.
 Spilled bytes belong to the connection's ring and precede later socket input.
 The single serving owner makes another connection's concurrent borrow impossible.
 
-These recorded choices concern this project's synthetic echo workload on native
-Ubuntu 26.04 hosted runners with Zig 0.16.0. They are not universal rankings.
-Each linked run retains raw trials, configuration, actor CPU and paired statistics.
-
-| Choice | Evidence and retained decision |
+| Choice | Cost and ownership contract |
 | --- | --- |
-| Shared rather than per-connection pipes | [Paired pipe ownership comparison](https://github.com/XXcipherX/zigveil/actions/runs/37008245734) avoided per-UID pipe quota pressure and improved 1000-stream bulk. Keep four extra fds per process. |
-| 64 KiB rings with spill recovery | [Ring/capacity sweep](https://github.com/XXcipherX/zigveil/actions/runs/37004715064) and [spill reactivation](https://github.com/XXcipherX/zigveil/actions/runs/37014555244) favored bulk capacity and showed why a drained ring must resume splice in the same callback. Keep bounded spill, not retained shared debt. |
-| Direct event dispatch | [Event coalescing](https://github.com/XXcipherX/zigveil/actions/runs/36998215301) did not give a consistent benefit and reduced amd64 bulk. Keep role/generation checks and bounded direct drives. |
-| No directional readiness hints | [Final hint comparison](https://github.com/XXcipherX/zigveil/actions/runs/37014880862) did not establish a consistent bulk/latency benefit. Keep the existing nonblocking drains. |
-| 256 KiB fairness quantum | [128 KiB](https://github.com/XXcipherX/zigveil/actions/runs/37014814331) and [64 KiB](https://github.com/XXcipherX/zigveil/actions/runs/37014817558) reduced 1000-stream throughput after spill recovery. Keep 256 KiB; verify fairness with an independent under-load RTT probe. |
-| Portable CPU baseline | [Native code generation](https://github.com/XXcipherX/zigveil/actions/runs/37002887766) showed changes within approximately 1% noise, so no native-only instruction requirement was introduced. The explicit Docker amd64-v3 profile remains optional. |
-| Adaptive small-message fallback | [Large-to-small phase comparison](https://github.com/XXcipherX/zigveil/actions/runs/37007266445) supports returning drained short-message streams to buffered I/O while permitting later bulk reactivation. |
-| Existing epoll/splice ownership | [Kernel profile](https://github.com/XXcipherX/zigveil/actions/runs/37018679423) places most sampled cost in Linux TCP/splice work. io_uring/send_zc have not been implemented or compared; they need a separate bottleneck/ownership case. |
+| Two process-owned pipes | Four extra fds per process, independent of connection count; every callback returns its borrow empty. |
+| Default 64 KiB rings | Startup-bounded storage; spills preserve byte order and resume the shared path after draining. |
+| Direct event dispatch | Role/generation checks precede each drive; no second ready queue or cached per-direction readiness state. |
+| 256 KiB / 128-call quantum | Bounds per-direction work per dispatch while allowing a stream to span several buffers. |
+| Portable CPU baseline | The ordinary binary uses baseline CPU requirements; the Docker amd64-v3 profile is an explicit alternative. |
+| Adaptive buffered I/O | Drained short-message streams return to buffered forwarding and may reactivate splice for later bulk data. |
 
-The production reference `28cdf224` was confirmed in 30-second × 5-repetition
-ordinary Zig 0.16.0 `ReleaseFast` runs for [bulk 1/10](https://github.com/XXcipherX/zigveil/actions/runs/37018663898),
-[bulk 100/1000](https://github.com/XXcipherX/zigveil/actions/runs/37018667812),
-[latency](https://github.com/XXcipherX/zigveil/actions/runs/37018671466), and
-[loaded latency/churn](https://github.com/XXcipherX/zigveil/actions/runs/37018675295).
-Its 1000-stream median echo goodput was 25.91 Gbit/s on arm64 and 13.22 Gbit/s on
-amd64; these are recorded loopback results, not a deployment or NIC ceiling.
-Future cleanup must compare against this optimized baseline on the same runner,
-with identical rings, chunk/credit, process count and ordinary build settings.
+For dataplane changes, select an explicit production revision supporting Zig 0.17.0
+and compare ordinary fast builds on the same runner. Keep rings, chunk/credit,
+process count and build settings matched. Measure loaded latency and actor CPU
+alongside throughput; diagnostic builds are separate opt-in variants. Current
+benchmark usage and output are documented in [bench/README.md](../bench/README.md).

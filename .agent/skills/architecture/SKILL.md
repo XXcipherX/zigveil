@@ -130,7 +130,8 @@ new bound or config key is necessary, validate it before bind and document units
 per-process semantics and the memory formula. Explain algorithmic costs and
 ownership for structural changes; measure workloads before claiming a throughput
 or latency improvement or choosing capacity limits from performance results.
-Review the [measured decisions](../../../docs/DESIGN.md#performance-decisions-and-measured-rejected-ideas)
-before reintroducing event coalescing, readiness hints, smaller quanta or private
-pipes. Cleanup must preserve paired ordinary fast performance, including
-loaded latency and CPU/Gbit; diagnostic builds measure the observer effect.
+Review the [dataplane choices](../../../docs/DESIGN.md#dataplane-choices) before
+changing event dispatch, readiness handling, fairness quanta or pipe ownership.
+Dataplane changes must preserve paired ordinary fast performance, including loaded
+latency and CPU/Gbit, with an explicit Zig 0.17.0 baseline. Diagnostic benchmark
+builds are opt-in and measure the observer effect.

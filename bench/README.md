@@ -1,4 +1,4 @@
-# Relay performance laboratory
+# Relay benchmarks
 
 The tools here are optional. Zigveil has no benchmark runtime dependencies.
 The workload is a synthetic ClientHello followed by opaque TCP echo data.
@@ -7,8 +7,10 @@ and application processing are outside this measurement.
 
 ## Paired measurements
 
-The manual **Benchmarks** workflow builds baseline and candidate on the same
-native Ubuntu 26.04 runner. Both use the candidate's harness. It rotates variant
+The manual **Benchmarks** workflow uses exactly Zig 0.17.0 on native Ubuntu 26.04
+runners. By default it measures the ordinary candidate and a direct-origin control.
+An explicitly supplied baseline is built on the same runner with the same compiler
+and uses the candidate's harness. The coordinator rotates variant
 order between repetitions, reverses the ring sweep, and retains every trial,
 including failures. amd64 and arm64 results are separate.
 
@@ -23,10 +25,10 @@ Use 10 seconds × 3 repetitions for discovery and 30 seconds × 3 for confirmati
 The ten inputs are duration, repeats, baseline, workloads, rings, profiling,
 processes, instrumentation, architecture and optional JSON options.
 Empty `baseline` omits that build. `instrumentation=false` omits the diagnostic
-binary. Profiling choices are `basic`, `perf-stat` and `perf-record`.
-The default baseline is the final pre-migration production revision `1e1f0f7`;
-supply a different full commit when comparing another change. Match
-baseline/candidate configuration and select its compiler with `baseline_zig`.
+binary; both are the defaults. Profiling defaults to `basic`; `perf-stat` and
+`perf-record` are explicit diagnostic choices. For a code comparison, supply the
+full production commit immediately before the change. That revision must support
+Zig 0.17.0. Match baseline/candidate configuration to isolate the code change.
 
 | JSON option | Default | Purpose |
 | --- | --- | --- |
@@ -41,7 +43,6 @@ baseline/candidate configuration and select its compiler with `baseline_zig`.
 | `origin_io` | `buffered` | Native echo via its reference queue or a single shared `splice` pipe with bounded queue fallback |
 | `baseline_ring` | candidate ring | Explicit old ring for comparing default configurations |
 | `baseline_processes` | candidate process count | Paired scale-out with identical baseline/candidate code |
-| `baseline_zig` | `0.16.0` | Exact compiler for the historical baseline; `0.17.0` for a migrated revision |
 | `cpu` | `baseline` | Candidate code generation: `baseline`, `native`, or `x86_64_v3` on amd64 |
 | `relay_splice` | true | Production splice path; false provides a buffered control |
 | `baseline_splice` | baseline build default | Explicit splice build option for comparisons with a revision supporting it |
@@ -97,15 +98,9 @@ forwarded-byte counters. Both denominators are explicit. Corruption, timeout,
 stream failure, unexpected proxy errors or unreclaimed fds fail the trial.
 Failed rates are `null`; all owned child cleanup has deadlines.
 After drain, an ordinary proxy retains six base fds, or ten after lazy shared-pipe
-allocation. An explicitly buffered variant must retain six. Baselines predating
-splice can also be compared without a special ownership option; intermediate
-private-pipe experiments are outside the supported laboratory configuration.
-
-A [native direct-control investigation](https://github.com/XXcipherX/zigveil/actions/runs/37020854826)
-observed timeouts with 1000 streams and 1 MiB credit even without a proxy, alongside
-Linux TCP memory-pressure/drop counters. This large-window case remains a workload
-limitation requiring separate diagnosis. It is retained as a failed measurement,
-not silently reduced to smaller credit or interpreted as a proxy throughput result.
+allocation. An explicitly buffered variant must retain six. Inspect socket-pressure
+records and generator/origin CPU when a trial fails; failures remain in the output
+and do not produce a throughput claim.
 
 Latency reports sample count, p50/p90/p95/p99, max, mean and standard deviation.
 p99.9 requires 10,000 retained samples; the reservoir holds at most one million.
@@ -143,8 +138,8 @@ matched profiling settings for diagnostic comparisons.
 `-Ddataplane_metrics=true` compiles plain single-owner diagnostic counters.
 The production default is false, with zero counter storage and erased increments.
 Only that build adds a `dataplane` JSON snapshot to SIGUSR1. It covers actual I/O,
-EAGAIN/EINTR, partial writes, queue/pump exits, readiness batches, duplicate
-dispatch opportunities and control syscalls. It adds no per-packet timestamps,
+EAGAIN/EINTR, partial writes, queue/pump exits, readiness batches and control
+syscalls. It adds no per-packet timestamps,
 allocations, atomics or logs. Counter deltas refer to the window; size/batch
 maxima are lifetime gauges including warmup. Runtime stats stay separate.
 
@@ -152,19 +147,11 @@ Metadata records both revisions, compiler/build/options, CPU model/count/affinit
 kernel, visible frequency/governor, NUMA, cgroup quota/cpuset/memory limits, fd
 limits, TCP/pipe sysctls, parameters and perf capabilities. Unavailable values
 are `null`. Artifacts include child logs, configurations and before/after resources.
-Actions also retains binary section/symbol sizes and `.text` hashes to check
-generated behavior when a compiler or structural change affects performance.
-Disassembly is retained alongside symbol sizes; an inlined parser/ring operation
-may have no separate symbol.
-
-The candidate always uses exact Zig 0.17.0 with `-Doptimize=fast`. The default
-baseline is the final pre-migration revision `1e1f0f7`, built independently with
-Zig 0.16.0 and its `ReleaseFast` spelling. This isolated historical compiler is
-used only by the benchmark baseline. For a baseline already migrated to 0.17,
-set `options={"baseline_zig":"0.17.0"}`. Metadata records
+Both candidate and optional baseline use exact Zig 0.17.0 with `-Doptimize=fast`.
+Metadata records
 `candidate_zig_version`, `baseline_zig_version` and each build mode; the job also
-prints and verifies both actual versions. Keep CPU, rings, splice, processes and
-workload parameters matched for a compiler comparison.
+verifies the installed compiler and prints the build settings. Keep CPU, rings,
+splice, processes and workload parameters matched for a revision comparison.
 
 ## Running on Linux
 
@@ -176,7 +163,7 @@ zig build -Doptimize=fast -Ddataplane_metrics=true --prefix /tmp/zigveil-metrics
 python3 bench/ci.py --binary /tmp/zigveil-candidate/bin/zigveil \
   --metrics-binary /tmp/zigveil-metrics/bin/zigveil \
   --native-binary /tmp/zigveil-candidate/bin/zigveil-bench \
-  --duration 30 --repeats 5 --profiling basic --output /tmp/zigveil-results
+  --duration 30 --repeats 3 --profiling basic --output /tmp/zigveil-results
 ```
 
 Libc is used only by the optional native benchmark tool. It supports bulk and a

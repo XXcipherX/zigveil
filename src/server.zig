@@ -16,7 +16,6 @@ const Slot = struct {
     masks: [2]u32 = .{ 0, 0 },
     timer_state: ?@import("connection.zig").State = null,
     timer_prefix: bool = false,
-    diagnostic: if (metrics.enabled) struct { batch: u64 = 0, role: bool = false, both: bool = false } else struct {} = .{},
 };
 
 pub const Server = struct {
@@ -39,7 +38,6 @@ pub const Server = struct {
     listener_registered: bool = true,
     accept_resume_ms: u64 = 0,
     stop_deadline_ms: ?u64 = null,
-    diagnostic_batch: if (metrics.enabled) u64 else void = if (metrics.enabled) 0 else {},
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger) !Server {
         const raw = config.raw.value;
@@ -148,7 +146,6 @@ pub const Server = struct {
             self.io.metrics.add("epoll_events", rc);
             self.io.metrics.maximum("epoll_max_batch", rc);
             if (rc == events.len) self.io.metrics.add("epoll_full_batches", 1);
-            if (metrics.enabled) self.diagnostic_batch +%= 1;
             now = try net.nowMs();
             for (events[0..rc]) |event| {
                 const token = event.data.u64;
@@ -169,20 +166,6 @@ pub const Server = struct {
                 self.io.metrics.add("connection_events", 1);
                 const conn = &self.slots[index].conn;
                 const backend = token & 1 != 0;
-                if (metrics.enabled) {
-                    const diagnostic = &self.slots[index].diagnostic;
-                    if (diagnostic.batch == self.diagnostic_batch) {
-                        self.io.metrics.add("coalescible_events", 1);
-                        if (diagnostic.role != backend and !diagnostic.both) {
-                            diagnostic.both = true;
-                            self.io.metrics.add("batch_both", 1);
-                            if (backend) self.io.metrics.add("batch_client_only", std.math.maxInt(u64)) else self.io.metrics.add("batch_backend_only", std.math.maxInt(u64));
-                        }
-                    } else {
-                        diagnostic.* = .{ .batch = self.diagnostic_batch, .role = backend };
-                        if (backend) self.io.metrics.add("batch_backend_only", 1) else self.io.metrics.add("batch_client_only", 1);
-                    }
-                }
                 if (event.events & linux.EPOLL.ERR != 0 and conn.state != .connecting) {
                     conn.checkSocketError(&self.io, backend, &self.counts);
                 }

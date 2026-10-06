@@ -13,8 +13,8 @@ on:
         default: '3'
         type: string
       baseline:
-        description: Baseline ref, built on this same runner (empty disables)
-        default: '1e1f0f701e581122935cbc6f4974340acc628ad0'
+        description: Optional Zig 0.17.0 baseline ref, built on this same runner
+        default: ''
         type: string
       workloads:
         description: Comma-separated MODE:STREAMS
@@ -37,14 +37,14 @@ on:
       instrumentation:
         description: Also measure a compile-time diagnostic build
         type: boolean
-        default: true
+        default: false
       architecture:
         description: Native runner architecture
         type: choice
         default: both
         options: [both, amd64, arm64]
       options:
-        description: JSON options (chunk_bytes, inflight_bytes, warmup, variants, generator_workers, origin_io, baseline_ring, baseline_processes, baseline_zig, cpu, relay_splice)
+        description: JSON options (chunk_bytes, inflight_bytes, warmup, variants, generator_workers, origin_io, baseline_ring, baseline_processes, cpu, relay_splice)
         type: string
         default: '{}'
 permissions:
@@ -81,31 +81,6 @@ jobs:
           test "$("$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0/zig" version)" = 0.17.0
           "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0/zig" version
           echo "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0" >> "$GITHUB_PATH"
-      - name: Prepare isolated baseline compiler
-        if: inputs.baseline != ''
-        env:
-          BENCH_OPTIONS: ${{ inputs.options }}
-          ZIG_ARCH: ${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}
-          BASELINE_ZIG_SHA: ${{ matrix.arch == 'amd64' && '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00' || 'ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17' }}
-        run: |
-          set -euo pipefail
-          version=$(python3 -c 'import json,os; v=json.loads(os.environ["BENCH_OPTIONS"]).get("baseline_zig","0.16.0"); assert v in ("0.16.0","0.17.0"); print(v)')
-          if [[ "$version" == 0.16.0 ]]; then
-            curl --fail --location --retry 3 --output "$RUNNER_TEMP/baseline-zig.tar.xz" \
-              "https://ziglang.org/download/0.16.0/zig-${ZIG_ARCH}-linux-0.16.0.tar.xz"
-            echo "$BASELINE_ZIG_SHA  $RUNNER_TEMP/baseline-zig.tar.xz" | sha256sum --check
-            tar -xf "$RUNNER_TEMP/baseline-zig.tar.xz" -C "$RUNNER_TEMP"
-            compiler="$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.16.0/zig"
-            mode=ReleaseFast
-          else
-            compiler=$(command -v zig)
-            mode=fast
-          fi
-          test "$("$compiler" version)" = "$version"
-          "$compiler" version
-          echo "BASELINE_ZIG=$compiler" >> "$GITHUB_ENV"
-          echo "BENCH_BASELINE_ZIG_VERSION=$version" >> "$GITHUB_ENV"
-          echo "BENCH_BASELINE_BUILD_MODE=$mode" >> "$GITHUB_ENV"
       - name: Build ordinary production fast
         env:
           BENCH_OPTIONS: ${{ inputs.options }}
@@ -116,7 +91,7 @@ jobs:
           echo "BENCH_CPU=$cpu" >> "$GITHUB_ENV"
           echo "BENCH_SPLICE=$splice" >> "$GITHUB_ENV"
           zig build -Doptimize=fast -Dcpu="$cpu" -Drelay_splice="$splice" -Dbench_tools=true --prefix "$RUNNER_TEMP/candidate"
-      - name: Build baseline with its own compiler
+      - name: Build optional baseline with Zig 0.17.0
         if: inputs.baseline != ''
         working-directory: .baseline
         env:
@@ -126,31 +101,13 @@ jobs:
           extra=()
           splice=$(python3 -c 'import json,os; v=json.loads(os.environ["BENCH_OPTIONS"]).get("baseline_splice"); assert v is None or type(v) is bool; print("" if v is None else str(v).lower())')
           if [[ -n "$splice" ]]; then extra+=(-Drelay_splice="$splice"); fi
-          "$BASELINE_ZIG" build -Doptimize="$BENCH_BASELINE_BUILD_MODE" -Dcpu=baseline "${extra[@]}" --prefix "$RUNNER_TEMP/baseline"
+          zig build -Doptimize=fast -Dcpu=baseline "${extra[@]}" --prefix "$RUNNER_TEMP/baseline"
           echo "BENCH_BASELINE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BENCH_BASELINE_ZIG_VERSION=$(zig version)" >> "$GITHUB_ENV"
+          echo "BENCH_BASELINE_BUILD_MODE=fast" >> "$GITHUB_ENV"
       - name: Build optional diagnostic fast
         if: inputs.instrumentation
         run: zig build -Doptimize=fast -Dcpu="$BENCH_CPU" -Drelay_splice="$BENCH_SPLICE" -Ddataplane_metrics=true --prefix "$RUNNER_TEMP/metrics"
-      - name: Record generated binary sizes and text sections
-        env:
-          HAVE_BASELINE: ${{ inputs.baseline != '' }}
-          HAVE_METRICS: ${{ inputs.instrumentation }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/zigveil-benchmarks/generated"
-          variants=(candidate)
-          if [[ "$HAVE_BASELINE" == true ]]; then variants+=(baseline); fi
-          if [[ "$HAVE_METRICS" == true ]]; then variants+=(metrics); fi
-          for variant in "${variants[@]}"; do
-            binary="$RUNNER_TEMP/$variant/bin/zigveil"
-            stat --printf="$variant binary bytes: %s\n" "$binary"
-            size "$binary" | tee "$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.sections.txt"
-            nm --print-size --size-sort "$binary" > "$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.symbols.txt"
-            awk '$4 ~ /Connection.*(drive|pump)|Server.*run|client_hello|buffer.*(Buffer|Ring)/' "$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.symbols.txt"
-            objdump --disassemble --no-show-raw-insn "$binary" > "$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.assembly.txt"
-            objcopy --dump-section ".text=$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.text.bin" "$binary" "$RUNNER_TEMP/$variant.inspection"
-            sha256sum "$RUNNER_TEMP/zigveil-benchmarks/generated/$variant.text.bin"
-          done
       - name: Measure paired workloads with coordinated CPU windows
         env:
           BENCH_BUILD_MODE: fast

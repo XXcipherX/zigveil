@@ -82,6 +82,7 @@ python3 test/bench_harness.py --binary zig-out/bin/zigveil
 
 The manually dispatched Benchmarks workflow records actual workloads and direct
 controls; see [the benchmark guide](../bench/README.md#paired-measurements).
+It uses only Zig 0.17.0; revision baselines and diagnostic builds are opt-in.
 Timing bounds in integration
 tests allow event-batch delays and runner scheduling; throughput assertions and
 performance numbers are intentionally absent. Production-host soak, real client

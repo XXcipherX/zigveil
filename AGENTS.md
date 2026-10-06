@@ -37,8 +37,8 @@ Read the relevant project guides before changing behavior:
 13. Io owns two shared pipes, never a slot. A pump returns its borrow empty on
     every exit; deferred live bytes belong to that connection's fixed ring.
 14. Dataplane diagnostics remain compile-time optional with zero production
-    storage/work. Validate structural cleanup against the optimized baseline
-    using ordinary fast and paired measurements on the same runner.
+    storage/work. Validate structural dataplane changes against an explicit
+    production baseline using ordinary fast and paired measurements on the same runner.
 15. Fallback is pre-routing only. Classifier failure and partial EOF/deadline may
     select it; empty input, fatal transport errors and capacity failures cannot.
     A selected backend's failure never retries a second destination. PPv2 metadata
@@ -57,6 +57,11 @@ DNS refresh/discovery or worker frameworks. Explain algorithmic costs and owners
 structural choices. Quantified performance claims need controlled measurements
 with workload, capacity, build mode, CPU/kernel versions and raw data. Keep the
 architecture justified by this project's own requirements and measurements.
+
+Use only Zig 0.17.0 throughout builds, CI and benchmarks. Optional benchmark
+baselines must support that release and use the same compiler as the candidate.
+Baseline builds, instrumentation and profiling are explicit comparison/diagnostic
+choices. Keep one-off measurements and compiler-inspection output out of the source tree.
 
 Honor the user's execution and publication constraints. Do not install tools,
 change system settings, publish artifacts or operate external deployments without

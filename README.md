@@ -307,8 +307,8 @@ The shared pipes add at most twice the configured ring capacity in kernel pipe
 storage and four descriptors per process. Startup requires a descriptor limit of
 at least `2 × max_connections + 12` (`+ 8` with splice disabled).
 
-The measured 64 KiB default favors sustained throughput. See the
-[recorded decisions](docs/DESIGN.md#performance-decisions-and-measured-rejected-ideas).
+The default ring size is 64 KiB. See the
+[dataplane choices](docs/DESIGN.md#dataplane-choices) for ownership and dispatch costs.
 Smaller rings reduce memory
 reservation and transfer sizes. The [benchmark guide](bench/README.md) explains
 how to compare sizes and account for CPU, latency and memory together.

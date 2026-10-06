@@ -413,8 +413,8 @@ def trial(args, mode, count, variant, ring, repeat, capability, diagnostic=False
                 if time.monotonic() >= deadline:
                     raise RuntimeError("proxy did not reclaim connections after drain")
                 time.sleep(.02)
-            # A baseline may predate splice or use its own default. The retained
-            # architecture has either no pipes or exactly four process-owned fds.
+            # Shared pipes are lazy: an idle process may retain only its base fds
+            # or also the four process-owned pipe fds.
             splice = args.baseline_splice is not False if variant == "baseline" else args.relay_splice
             post.append(dict(proc=collect.snapshot(p.pid), stats=snapshot["stats"], allowed_idle_fds=[6, 10] if splice else [6]))
         record["after_drain"] = post
@@ -591,14 +591,12 @@ def main():
     parser.add_argument("--workloads", default=DEFAULT_CASES)
     parser.add_argument("--rings", default="65536")
     parser.add_argument("--processes", type=int, default=1)
-    parser.add_argument("--profiling", choices=("basic", "perf-stat", "perf-record"), default="perf-stat")
+    parser.add_argument("--profiling", choices=("basic", "perf-stat", "perf-record"), default="basic")
     parser.add_argument("--options", default="{}", help="JSON: chunk_bytes, inflight_bytes, warmup, variants, drain_timeout, baseline_ring")
     args = parser.parse_args()
     options = json.loads(args.options)
-    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "baseline_zig", "cpu", "relay_splice", "baseline_splice"}:
+    if set(options) - {"chunk_bytes", "inflight_bytes", "warmup", "warmup_bytes", "variants", "drain_timeout", "generator", "generator_workers", "origin", "origin_io", "baseline_ring", "baseline_processes", "cpu", "relay_splice", "baseline_splice"}:
         parser.error("unknown laboratory option")
-    if options.get("baseline_zig", "0.16.0") not in ("0.16.0", "0.17.0"):
-        parser.error("baseline_zig must be an exact supported release: 0.16.0 or 0.17.0")
     args.chunk_bytes, args.inflight_bytes = int(options.get("chunk_bytes", 65536)), int(options.get("inflight_bytes", 262144))
     args.warmup, args.drain_timeout = float(options.get("warmup", 1)), float(options.get("drain_timeout", 15))
     args.warmup_bytes = options.get("warmup_bytes")
