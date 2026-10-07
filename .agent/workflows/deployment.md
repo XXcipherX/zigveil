@@ -27,9 +27,13 @@ The installer is `deploy/install_docker_compose.sh`. First install needs a full
 CONFIG_SOURCE or explicit SNI/BACKEND. Existing JSON is retained on updates. Pull,
 Compose validation and an image-based --check finish before stopping/recreating
 the existing service. Never make an invalid config or failed pull disrupt it.
-Keep the host lock, stdin-only registry password handling, read-only mounts, fd
-limits and graceful-stop interval. The entrypoint must never activate example
+Keep the installation-directory lock, stdin-only registry password handling,
+read-only mounts, fd limits and graceful-stop interval. The entrypoint must never activate example
 routes or create a config as a side effect of --check/help/version.
+Validate root ownership and write permissions of the directory and every parent
+before creating/opening installation files. Refuse nonregular/symlinked lock files
+and open the lock without truncation. A symlink check alone cannot protect a
+directory controlled by another user.
 
 Compose uses host networking; loopback backends refer to the host. Hostname lookup
 uses the container's hosts/resolver files during preflight and startup; check those

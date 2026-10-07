@@ -31,11 +31,49 @@ def verify_stream(port):
         assert all_bytes(client) == payload
 
 
+def verify_install_path_guards():
+    # Hosted runners may deliberately make /opt group-writable for tool installs.
+    with tempfile.TemporaryDirectory(prefix="zigveil-path-guards-", dir="/root") as directory:
+        root = Path(directory)
+        victim = root / "victim"
+        victim.write_bytes(b"preserve this file\n")
+        cases = []
+        symlinked = root / "symlinked-lock"
+        symlinked.mkdir(mode=0o700)
+        (symlinked / ".install.lock").symlink_to(victim)
+        cases.append((symlinked, "regular lock file"))
+        writable = root / "writable"
+        writable.mkdir()
+        writable.chmod(0o777)
+        cases.append((writable / "install", "group/other-writable"))
+        unowned = root / "unowned"
+        unowned.mkdir(mode=0o700)
+        os.chown(unowned, 65534, 65534)
+        cases.append((unowned, "root-owned"))
+        for install_dir, error in cases:
+            env = dict(os.environ, INSTALL_DIR=str(install_dir), INSTALL_DOCKER="false",
+                       SNI="", BACKEND="", CONFIG_SOURCE="", GHCR_USER="", GHCR_TOKEN="")
+            result = command("bash", str(ROOT / "deploy/install_docker_compose.sh"), env=env, check=False)
+            assert result.returncode and error in result.stderr, result.stdout + result.stderr
+            assert victim.read_bytes() == b"preserve this file\n"
+        regular = root / "regular-lock"
+        regular.mkdir(mode=0o700)
+        lock = regular / ".install.lock"
+        lock.write_bytes(b"keep lock contents\n")
+        lock.chmod(0o600)
+        env = dict(os.environ, INSTALL_DIR=str(regular), INSTALL_DOCKER="false",
+                   SNI="", BACKEND="", CONFIG_SOURCE="", GHCR_USER="", GHCR_TOKEN="")
+        result = command("bash", str(ROOT / "deploy/install_docker_compose.sh"), env=env, check=False)
+        assert result.returncode and "First install needs" in result.stderr, result.stdout + result.stderr
+        assert lock.read_bytes() == b"keep lock contents\n"
+
+
 def run(image):
     assert os.geteuid() == 0, "Run on a disposable host as root"
     unit = Path("/etc/systemd/system/zigveil.service")
     assert not unit.exists(), "The test requires a host without Zigveil installed"
     assert command("docker", "inspect", "zigveil", check=False).returncode != 0, "A Zigveil container already exists"
+    verify_install_path_guards()
     registry = "zigveil-registry-" + uuid.uuid4().hex[:12]
     registry_port = free_port()
     registry_image = f"127.0.0.1:{registry_port}/zigveil:e2e"
@@ -49,7 +87,7 @@ def run(image):
             time.sleep(.2)
         else:
             raise AssertionError(pushed.stdout + pushed.stderr)
-        with tempfile.TemporaryDirectory(prefix="zigveil-installer-") as directory, Origin() as origin:
+        with tempfile.TemporaryDirectory(prefix="zigveil-installer-", dir="/root") as directory, Origin() as origin:
             install_dir = Path(directory) / "install"
             port = free_port()
             env = dict(os.environ, INSTALL_DIR=str(install_dir), REPO_RAW_URL=ROOT.as_uri(),

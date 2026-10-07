@@ -245,7 +245,7 @@ its `/etc/zigveil/config.json` is reused when no source was specified.
 | `SNI`, `BACKEND` | required for a generated first config | One exact route to an IP or hostname with port |
 | `CONFIG_SOURCE` | unset | Import a full config on first install |
 | `LISTEN` | `0.0.0.0:443` | Listener in a generated first config |
-| `INSTALL_DIR` | `/opt/zigveil` | Dedicated absolute directory without whitespace |
+| `INSTALL_DIR` | `/opt/zigveil` | Dedicated absolute directory under root-owned parents; no whitespace or group/other write access |
 | `IMAGE` | automatic | Explicit image/tag/digest; disables CPU profile selection |
 | `AUTO_IMAGE_CPU_VARIANT` | `true` | Try `latest-amd64-v3` on compatible x86_64 hosts; fall back to `latest` on pull failure |
 | `NOFILE_LIMIT` | `65536` | Container descriptor limit; must cover configured capacity |
@@ -254,8 +254,10 @@ its `/etc/zigveil/config.json` is reused when no source was specified.
 
 Compose uses host networking, a read-only root filesystem/config mount, only the
 bind-service capability, rotated logs and a 35-second graceful stop. Installing
-or updating is serialized by a host lock. Pull/preflight failure keeps the running
-service and deployment files intact. Re-run the installer to update the image:
+or updating in the same directory is serialized by a lock. The directory and its
+parents must be root-owned and not writable by other users; symlinked lock files
+are refused. Pull/preflight failure keeps the running service and deployment files
+intact. Re-run the installer to update the image:
 
 ```sh
 sudo bash deploy/install_docker_compose.sh

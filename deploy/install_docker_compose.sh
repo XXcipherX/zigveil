@@ -35,6 +35,27 @@ host_supports_v3() {
     [[ "$flags" == *" lzcnt "* || "$flags" == *" abm "* ]]
 }
 
+require_root_path() {
+    local owner mode
+    owner="$(stat -c %u -- "$1")" || fail "Cannot inspect $1"
+    mode="$(stat -c %a -- "$1")" || fail "Cannot inspect $1"
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] || fail "Expected a root-owned path at $1"
+    (( (8#$mode & 0022) == 0 )) || fail "Refusing a group/other-writable path at $1"
+}
+
+require_install_directory() {
+    local directory="$INSTALL_DIR"
+    while true; do
+        if [[ -e "$directory" || -L "$directory" ]]; then
+            [[ ! -L "$directory" && -d "$directory" ]] || fail "Expected a directory at $directory"
+            require_root_path "$directory"
+        fi
+        [[ "$directory" == / ]] && break
+        directory="${directory%/*}"
+        [[ -n "$directory" ]] || directory=/
+    done
+}
+
 install_tools() {
     local missing=false tool
     for tool in curl jq flock; do command -v "$tool" >/dev/null || missing=true; done
@@ -70,13 +91,20 @@ if [[ -n "${GHCR_USER:-}" && -z "${GHCR_TOKEN:-}" ]] || [[ -z "${GHCR_USER:-}" &
     fail "Set both GHCR_USER and GHCR_TOKEN, or neither"
 fi
 [[ ! -L "$SERVICE_FILE" ]] || fail "Refusing to replace a symlinked service unit"
+require_install_directory
 mkdir -p -- "$INSTALL_DIR"
+require_install_directory
+LOCK_FILE="$INSTALL_DIR/.install.lock"
+[[ ! -L "$LOCK_FILE" && ( ! -e "$LOCK_FILE" || -f "$LOCK_FILE" ) ]] || fail "Expected a regular lock file at $LOCK_FILE"
+if [[ -e "$LOCK_FILE" ]]; then require_root_path "$LOCK_FILE"; fi
 if ! command -v flock >/dev/null; then
     command -v apt-get >/dev/null || fail "Install util-linux first"
     apt-get update < /dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y util-linux < /dev/null
 fi
-exec 9> "$INSTALL_DIR/.install.lock"
+# Trusted parents prevent unprivileged replacement between validation and open.
+# Append mode also preserves an existing file's contents before flock succeeds.
+exec 9>> "$LOCK_FILE"
 flock -n 9 || fail "Another installer is running"
 CONFIG_FILE="$INSTALL_DIR/config.json"
 COMPOSE_FILE="$INSTALL_DIR/compose.yml"

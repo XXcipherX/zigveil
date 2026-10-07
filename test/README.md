@@ -111,6 +111,8 @@ install, actual traffic, refusal of insufficient fd capacity without disturbing 
 running service, config preservation and a real container update.
 The update also verifies log_level none, socket-based readiness and visible explicit
 preflight failures without depending on a startup banner.
+Path regressions reject writable/unowned installation parents and a symlinked
+lock, and require an existing regular lock's contents to survive opening.
 
 The optional `-Ddataplane_metrics=true` build has separate engine and real-socket
 coverage. `test/bench_lab.py` checks paired statistics, coordinated measurement
