@@ -97,6 +97,9 @@ reported as `drain_seconds`. CPU/cycles use the steady window's actual proxy
 forwarded-byte counters. Both denominators are explicit. Corruption, timeout,
 stream failure, unexpected proxy errors or unreclaimed fds fail the trial.
 Failed rates are `null`; all owned child cleanup has deadlines.
+The Python generator also reports setup/warmup failures as JSON with a nonzero
+exit status and null rates. Warmup workers are cancelled and joined before their
+streams close; no measurement starts after failed warmup.
 After drain, an ordinary proxy retains six base fds, or ten after lazy shared-pipe
 allocation. An explicitly buffered variant must retain six. Inspect socket-pressure
 records and generator/origin CPU when a trial fails; failures remain in the output

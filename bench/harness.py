@@ -204,6 +204,21 @@ class Control:
         return cls(reader, writer)
 
 
+def failed_preparation(args, phase, errors):
+    result = {"mode": args.mode, "concurrency": args.concurrency, "valid": False,
+              "failure_phase": phase, f"{phase}_failed": True,
+              "seconds": None, "measurement_window": {},
+              "duration_requested_s": args.duration,
+              "error_count": len(errors), "errors": list(dict.fromkeys(repr(x) for x in errors))[:16],
+              "kernel": platform.release(), "python": platform.python_version()}
+    for metric in ("aggregate_forwarded_gbit_s", "echo_goodput_gbit_s", "connections_per_second",
+                   "round_trips_per_second", "latency_us_p50", "latency_us_p90", "latency_us_p95",
+                   "latency_us_p99", "latency_us_p999", "latency_us_max", "latency_us_mean",
+                   "latency_us_stddev"):
+        result[metric] = None
+    return result
+
+
 async def run(args):
     pairs = []
     tasks = []
@@ -223,20 +238,26 @@ async def run(args):
                     pairs.append(pair)
             stream_count = args.concurrency + (args.mode == "loaded-latency")
             prepared = await asyncio.gather(*(prepare() for _ in range(stream_count)), return_exceptions=True)
-            errors = [repr(x) for x in prepared if isinstance(x, BaseException)]
+            errors = [x for x in prepared if isinstance(x, BaseException)]
             if errors:
-                return {"mode": args.mode, "concurrency": args.concurrency,
-                        "valid": False, "setup_failed": True, "error_count": len(errors),
-                        "errors": list(dict.fromkeys(errors))[:16]}
+                return failed_preparation(args, "setup", errors)
         warmup_seconds = getattr(args, "warmup", 0)
-        if args.mode == "churn":
-            if warmup_seconds:
-                await churn(args, time.monotonic() + warmup_seconds, Progress())
-        elif warmup_seconds:
-            sizes = [getattr(args, "warmup_bytes", None) or (64 if args.mode == "latency" else 65536)] * len(pairs)
-            if args.mode == "loaded-latency":
-                sizes[-1] = 64
-            await asyncio.gather(*(warmup(pair, warmup_seconds, size) for pair, size in zip(pairs, sizes)))
+        if warmup_seconds:
+            if args.mode == "churn":
+                tasks = [asyncio.create_task(churn(args, time.monotonic() + warmup_seconds, Progress()))]
+            else:
+                sizes = [getattr(args, "warmup_bytes", None) or (64 if args.mode == "latency" else 65536)] * len(pairs)
+                if args.mode == "loaded-latency":
+                    sizes[-1] = 64
+                tasks = [asyncio.create_task(warmup(pair, warmup_seconds, size))
+                         for pair, size in zip(pairs, sizes)]
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks), warmup_seconds + 5)
+            except Exception as exc:
+                # The finally block cancels/joins every warmup worker before
+                # closing its streams. External cancellation still propagates.
+                return failed_preparation(args, "warmup", [exc])
+            tasks.clear()
         progress = [Progress() for _ in range(len(pairs) if args.mode != "churn" else args.concurrency)]
         if control:
             await control.notify("ready", streams=len(pairs), warmup_s=warmup_seconds)

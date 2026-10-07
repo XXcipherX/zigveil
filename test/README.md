@@ -115,6 +115,9 @@ preflight failures without depending on a startup banner.
 Path regressions reject writable/unowned installation parents and a symlinked
 lock, and require an existing regular lock's contents to survive opening.
 
+Python generator regressions require warmup timeout/corruption to produce failed
+JSON without rates, join other warmup workers, and preserve external cancellation.
+
 The optional `-Ddataplane_metrics=true` build has separate engine and real-socket
 coverage. `test/bench_lab.py` checks paired statistics, coordinated measurement
 windows, native/Python interoperability, two generators, exact bulk echo,

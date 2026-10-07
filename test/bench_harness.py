@@ -158,6 +158,88 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["errors"])
         self.assertIsNone(result["aggregate_forwarded_gbit_s"])
 
+    async def test_warmup_failure_cancels_other_workers(self):
+        entered = asyncio.Event()
+        count = 0
+        async def warmup_peer(reader, writer):
+            nonlocal count
+            count += 1
+            index = count
+            wire = harness.client_hello("example.com")
+            writer.write(await reader.readexactly(len(wire)))
+            await writer.drain()
+            data = await reader.readexactly(64)
+            if index == 1:
+                await entered.wait()
+                writer.write(bytes([data[0] ^ 1]) + data[1:])
+                await writer.drain()
+            else:
+                entered.set()
+                while await reader.read(65536):
+                    pass
+        async with origin(warmup_peer) as port:
+            result = await asyncio.wait_for(harness.run(arguments(port, warmup=10, warmup_bytes=64)), 2)
+            self.assertFalse(result["valid"], result)
+            self.assertTrue(result["warmup_failed"], result)
+            self.assertIsNone(result["aggregate_forwarded_gbit_s"])
+            self.assertIsNone(result["latency_us_p99"])
+            leaked = [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "warmup"]
+            self.assertEqual([], leaked)
+
+    async def test_warmup_timeout_cli_is_json_and_exits_nonzero(self):
+        async with origin(stalled_echo) as port:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, harness.__file__, "run", "--port", str(port),
+                "--warmup", ".01", "--warmup-bytes", "64", "--duration", ".1",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+        result = json.loads(stdout)
+        self.assertEqual(1, process.returncode)
+        self.assertFalse(result["valid"])
+        self.assertEqual("warmup", result["failure_phase"])
+        self.assertTrue(result["errors"])
+        self.assertIsNone(result["echo_goodput_gbit_s"])
+        self.assertNotIn(b"Traceback", stderr)
+
+    async def test_cancellation_during_warmup_propagates_and_joins_workers(self):
+        entered = asyncio.Event()
+        count = 0
+        async def waiting_peer(reader, writer):
+            nonlocal count
+            wire = harness.client_hello("example.com")
+            writer.write(await reader.readexactly(len(wire)))
+            await writer.drain()
+            await reader.readexactly(64)
+            count += 1
+            if count == 2:
+                entered.set()
+            while await reader.read(65536):
+                pass
+        async with origin(waiting_peer) as port:
+            task = asyncio.create_task(harness.run(arguments(port, warmup=20, warmup_bytes=64)))
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            leaked = [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "warmup"]
+            self.assertEqual([], leaked)
+
+    async def test_churn_warmup_connect_failure_is_failed_json(self):
+        async def corrupt_hello(reader, writer):
+            wire = await reader.readexactly(len(harness.client_hello("example.com")))
+            writer.write(bytes([wire[0] ^ 1]) + wire[1:])
+            await writer.drain()
+        async with origin(corrupt_hello) as port:
+            result = await harness.run(arguments(port, mode="churn", warmup=.1))
+        self.assertFalse(result["valid"], result)
+        self.assertTrue(result["warmup_failed"], result)
+        self.assertIsNone(result["connections_per_second"])
+
     async def test_same_length_bulk_corruption_is_rejected(self):
         async def corrupt(reader, writer):
             wire = harness.client_hello("example.com")

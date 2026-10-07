@@ -56,6 +56,8 @@ directly under reproducible workloads before making throughput claims. The manua
 Benchmarks workflow records hosted-runner measurements and direct-origin controls;
 inspect all repetitions and artifacts, and retain failures. Harness changes must
 preserve bounded echo credit, failed-run JSON/nonzero status and cancellation cleanup.
+Cover pre-measurement warmup failures as well: keep rates null, cancel/join every
+owned warmup task before closing streams, and propagate external cancellation.
 
 For dataplane work, compare baseline/candidate in one Benchmarks job. Check separate
 generator/origin CPU, measurement-window skew, repeated paired deltas, tail latency
