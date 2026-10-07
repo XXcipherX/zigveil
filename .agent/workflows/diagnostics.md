@@ -83,3 +83,7 @@ and compare byte streams at the controlled origin. For CPU or throughput concern
 use bench/collect.py plus a controlled harness and optional perf. High generator or
 origin CPU can make a proxy appear saturated when it is not. Keep payload contents
 out of normal diagnostics.
+The paired laboratory stores CPU bounds around each SIGUSR1 byte snapshot. Inspect
+cpu_forwarded_window and measurement.proxy_counter_snapshots before comparing CPU/Gbit;
+more than 1% boundary uncertainty makes that metric null without discarding valid
+throughput or the raw CPU interval.

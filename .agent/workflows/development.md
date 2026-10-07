@@ -69,7 +69,12 @@ owned warmup task before closing streams, and propagate external cancellation.
 
 For dataplane work, compare baseline/candidate in one Benchmarks job. Check separate
 generator/origin CPU, measurement-window skew, repeated paired deltas, tail latency
-under bulk load, exact payload validation and post-drain fd ownership. Measure
+under bulk load, exact payload validation and post-drain fd ownership.
+Bracket each proxy byte-counter capture with CPU samples, including tick uncertainty
+when schedstat is missing. Normalize the upper CPU bound only if the aggregate
+bound width is at most 1%; retain wider ranges as raw data and leave CPU/Gbit null.
+Keep generator/origin CPU independent of the proxy-byte denominator.
+Measure
 `-Ddataplane_metrics=true` observer overhead against ordinary fast. Perf
 availability is a measured capability, not a prerequisite; missing counters are null.
 Run `test/bench_lab.py` against an instrumented binary and instrumented unit tests in

@@ -121,6 +121,8 @@ Python generator regressions require warmup timeout/corruption to produce failed
 JSON without rates, join other warmup workers, and preserve external cancellation.
 The laboratory's required-workload mode must fail unavailable topology; the
 mandatory CI shared-splice run uses one generator and cannot pass by skipping it.
+CPU-window regressions check counter-capture brackets, upper/lower normalization,
+tick quantization, multi-proxy aggregation and suppression of uncertain CPU/Gbit.
 
 The optional `-Ddataplane_metrics=true` build has separate engine and real-socket
 coverage. `test/bench_lab.py` checks paired statistics, coordinated measurement

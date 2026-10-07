@@ -81,8 +81,9 @@ at 10 Hz. Native origin startup reports its actual I/O mode and any pipe fallbac
 Bulk/latency streams establish and warm up before a ready/go barrier. The
 latency probe uses 64-byte warmup messages, bulk uses 64 KiB. Multi-generator
 rates use the common earliest-start/latest-end window, not summed individual rates.
-The coordinator captures counters and `/proc`, enables optional perf, then starts
-timed payload. End snapshots precede authorization of FIN and tail drain.
+The coordinator enables optional perf, brackets each proxy counter capture with
+`/proc` CPU samples, then starts timed payload. End snapshots use the same brackets
+and precede authorization of FIN and tail drain.
 Setup and teardown are excluded from steady-state CPU metrics. Boundary times
 and skew are retained. Churn includes connect, ClientHello echo and close.
 
@@ -99,8 +100,16 @@ ceiling was observed. For isolated latency under load, use one generator with
 
 `echo_goodput_gbit_s` counts returned payload once; `aggregate_forwarded_gbit_s`
 counts both directions. Their denominator includes final echo drain, separately
-reported as `drain_seconds`. CPU/cycles use the steady window's actual proxy
-forwarded-byte counters. Both denominators are explicit. Corruption, timeout,
+reported as `drain_seconds`. Proxy CPU/Gbit uses the actual byte-counter interval.
+CPU samples before/after each SIGUSR1 capture bound the CPU used in that interval;
+no interpolation assumes constant load. Raw records retain both bounds, all four
+samples and the request/acknowledgement times. The reported ratio uses the upper
+CPU bound and is `null` if the bound width exceeds 1% of that bound. Tick-based
+fallback includes the two counters' quantization error. Bounds are summed across
+proxies before applying this limit. Generator/origin CPU remains a separate resource
+observation and is not divided by proxy bytes. Perf encloses the counter snapshots,
+including their diagnostic overhead. Both throughput and CPU denominators are
+explicit. Corruption, timeout,
 stream failure, unexpected proxy errors or unreclaimed fds fail the trial.
 Failed rates are `null`; all owned child cleanup has deadlines.
 The Python generator also reports setup/warmup failures as JSON with a nonzero

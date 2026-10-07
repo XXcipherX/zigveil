@@ -86,8 +86,10 @@ def delta(before, after):
             for k in after if k != "event"}
 
 
-def proxy_snapshot(process, path, metrics):
+def proxy_snapshot(process, path, metrics, *, sample_cpu=False):
     offset = path.stat().st_size
+    cpu_before = collect.snapshot(process.pid) if sample_cpu else None
+    requested_ns = time.monotonic_ns()
     os.kill(process.pid, signal.SIGUSR1)
     deadline = time.monotonic() + 5
     result = {}
@@ -102,7 +104,10 @@ def proxy_snapshot(process, path, metrics):
                 if value.get("event") in ("stats", "dataplane"):
                     result[value["event"]] = value
         if "stats" in result and (not metrics or "dataplane" in result):
-            return dict(result, sampled_ns=time.monotonic_ns())
+            result.update(requested_ns=requested_ns, sampled_ns=time.monotonic_ns())
+            if sample_cpu:
+                result.update(cpu_before=cpu_before, cpu_after=collect.snapshot(process.pid))
+            return result
         if process.poll() is not None:
             raise RuntimeError("proxy exited while collecting diagnostics")
         time.sleep(.001)
@@ -200,7 +205,7 @@ def metric(record, key):
     proxy = [v for k, v in record.get("cpu", {}).items() if k.startswith("proxy")]
     forwarded = record.get("forwarded_bytes_window", 0)
     if key == "cpu_gbit":
-        return sum(p["cpu_seconds"] for p in proxy) / (forwarded * 8 / 1e9) if proxy and forwarded else None
+        return record.get("cpu_forwarded_window", {}).get("cpu_seconds_per_forwarded_gbit")
     if key == "rss":
         return sum(p["rss_bytes"] for p in proxy) if proxy else None
     if key in ("cycles_byte", "instructions_byte"):
@@ -358,11 +363,11 @@ def trial(args, mode, count, variant, ring, repeat, capability, diagnostic=False
             clients.append(probe)
             actors["probe"] = probe.process
         record["ready"] = {client.name: client.event("ready", 90) for client in clients}
-        before_stats = [proxy_snapshot(p, path, metrics_enabled) for p, path in proxies]
         perf_enabled = False
         if proxies:
             perf = profiling.Perf(capability, [p.pid for p, _ in proxies], directory / "proxy", record=diagnostic)
             perf_enabled = perf.gate("enable")
+        before_stats = [proxy_snapshot(p, path, metrics_enabled, sample_cpu=True) for p, path in proxies]
         before = {name: collect.snapshot(p.pid) for name, p in actors.items()}
         peaks = {name: s["rss_bytes"] for name, s in before.items()}
         go_ns = time.monotonic_ns()
@@ -374,20 +379,32 @@ def trial(args, mode, count, variant, ring, repeat, capability, diagnostic=False
         if isolated_probe:
             record["probe_window"] = probe.event("window", 30)
         notified_ns = time.monotonic_ns()
+        after_stats = [proxy_snapshot(p, path, metrics_enabled, sample_cpu=True) for p, path in proxies]
         after = {name: collect.snapshot(p.pid) for name, p in actors.items()}
-        after_stats = [proxy_snapshot(p, path, metrics_enabled) for p, path in proxies]
         stats = [delta(a["stats"], b["stats"]) for a, b in zip(before_stats, after_stats)]
         forwarded = sum(s["bytes_client_to_backend"] + s["bytes_backend_to_client"] for s in stats) if stats else window["tx"] + window["rx"]
         if not stats and isolated_probe:
             forwarded += record["probe_window"]["tx"] + record["probe_window"]["rx"]
         record["forwarded_bytes_window"] = forwarded
         record["stats_window"] = stats
-        record["cpu"] = {name: collect.difference(before[name], after[name], forwarded, peaks[name]) for name in actors}
+        record["cpu"] = {name: collect.difference(before[name], after[name], peak_rss=peaks[name]) for name in actors}
+        proxy_cpu = []
+        for i, (start_sample, end_sample, counters) in enumerate(zip(before_stats, after_stats, stats)):
+            name = f"proxy{i}"
+            own_bytes = counters["bytes_client_to_backend"] + counters["bytes_backend_to_client"]
+            peak = max(peaks[name], *(s["rss_bytes"] for boundary in (start_sample, end_sample)
+                                      for s in (boundary["cpu_before"], boundary["cpu_after"])))
+            value = collect.counter_window(start_sample, end_sample, own_bytes, peak)
+            record["cpu"][name] = value
+            proxy_cpu.append(value)
+        record["cpu_forwarded_window"] = collect.forwarded_cpu_window(proxy_cpu, forwarded)
         record["measurement"] = dict(generator=window, coordinator_go_ns=go_ns, notification_ns=notified_ns,
                                      generator_windows=windows,
                                      start_skew_ns=window["start_ns"] - go_ns, end_notification_skew_ns=notified_ns - window["end_ns"],
                                      proc_before=before, proc_after=after, stats_before_ns=[s["sampled_ns"] for s in before_stats],
-                                     stats_after_ns=[s["sampled_ns"] for s in after_stats])
+                                     stats_after_ns=[s["sampled_ns"] for s in after_stats],
+                                     proxy_counter_snapshots={f"proxy{i}": dict(before=a, after=b)
+                                                              for i, (a, b) in enumerate(zip(before_stats, after_stats))})
         if metrics_enabled:
             values = [delta(a["dataplane"], b["dataplane"]) for a, b in zip(before_stats, after_stats)]
             metrics = {k: (max(v[k] for v in values) if k in GAUGES - {"pipe_live", "active"} else sum(v[k] for v in values)) for k in values[0]}
@@ -396,6 +413,7 @@ def trial(args, mode, count, variant, ring, repeat, capability, diagnostic=False
             record["maxima_scope"] = "process lifetime including warmup; counters are window deltas"
         if perf:
             record["perf"] = perf.finish(forwarded)
+            record["perf"]["counter_window_scope"] = "encloses SIGUSR1 byte snapshots, including snapshot overhead"
             perf = None
             if not perf_enabled:
                 record["perf"]["available"] = False

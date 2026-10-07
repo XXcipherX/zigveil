@@ -19,7 +19,62 @@ BINARY = None
 NORMAL = NATIVE = None
 
 
+def counter_boundaries(cpu_values, times):
+    samples = []
+    for cpu_ns, sample_ns in zip(cpu_values, times):
+        samples.append(dict(sample_ns=sample_ns, runtime_ns=cpu_ns, user_ticks=cpu_ns // 10_000_000,
+                            system_ticks=0, minor_faults=0, major_faults=0, cpu_migrations=0,
+                            runqueue_ns=0, timeslices=0, rss_bytes=4096, hwm_rss_bytes=4096,
+                            virtual_bytes=8192, voluntary_switches=0, involuntary_switches=0,
+                            threads=1, fds=6))
+    return [dict(cpu_before=left, cpu_after=right, requested_ns=left["sample_ns"] + 1_000_000,
+                 sampled_ns=right["sample_ns"] - 1_000_000) for left, right in (samples[:2], samples[2:])]
+
+
 class Laboratory(unittest.TestCase):
+    def test_forwarded_cpu_uses_bracket_bounds_and_suppresses_uncertain_ratios(self):
+        before, after = counter_boundaries([100_000_000, 102_000_000, 1_102_000_000, 1_104_000_000],
+                                           [1_000_000_000, 1_003_000_000, 2_005_000_000, 2_008_000_000])
+        value = ci.collect.counter_window(before, after, 125_000_000)
+        self.assertAlmostEqual(1., value["cpu_seconds_lower_bound"])
+        self.assertAlmostEqual(1.004, value["cpu_seconds_upper_bound"])
+        self.assertAlmostEqual(1.004, value["cpu_seconds_per_forwarded_gbit"])
+        self.assertEqual("schedstat", value["cpu_source"])
+        record = dict(passed=True, result={}, cpu={"proxy0": value}, forwarded_bytes_window=125_000_000,
+                      cpu_forwarded_window=ci.collect.forwarded_cpu_window([value], 125_000_000))
+        self.assertAlmostEqual(1.004, ci.metric(record, "cpu_gbit"))
+        # A delayed final capture includes enough extra CPU to invalidate the
+        # point ratio, even though byte and CPU counters remain independently valid.
+        after["cpu_after"]["runtime_ns"] = 1_304_000_000
+        after["cpu_after"]["sample_ns"] = 2_505_000_000
+        value = ci.collect.counter_window(before, after, 125_000_000)
+        self.assertAlmostEqual(1., value["cpu_seconds_lower_bound"])
+        self.assertAlmostEqual(1.204, value["cpu_seconds_upper_bound"])
+        self.assertIsNone(value["cpu_seconds_per_forwarded_gbit"])
+        record["cpu"]["proxy0"] = value
+        record["cpu_forwarded_window"] = ci.collect.forwarded_cpu_window([value], 125_000_000)
+        self.assertFalse(record["cpu_forwarded_window"]["available"])
+        self.assertIsNone(ci.metric(record, "cpu_gbit"))
+
+    def test_cpu_window_fallback_accounts_for_tick_quantization(self):
+        before, after = counter_boundaries([100_000_000, 100_000_000, 10_100_000_000, 10_100_000_000],
+                                           [1_000_000_000, 1_003_000_000, 11_005_000_000, 11_008_000_000])
+        before["cpu_before"]["runtime_ns"] = None
+        with patch.object(ci.collect.os, "sysconf", return_value=100):
+            value = ci.collect.counter_window(before, after, 125_000_000)
+        self.assertEqual("stat_ticks", value["cpu_source"])
+        self.assertAlmostEqual(9.98, value["cpu_seconds_lower_bound"])
+        self.assertAlmostEqual(10.02, value["cpu_seconds_upper_bound"])
+        self.assertAlmostEqual(10.02, value["cpu_seconds_per_forwarded_gbit"])
+
+    def test_cpu_window_bounds_aggregate_before_the_uncertainty_gate(self):
+        samples = [dict(cpu_seconds_lower_bound=.497, cpu_seconds_upper_bound=.5),
+                   dict(cpu_seconds_lower_bound=.499, cpu_seconds_upper_bound=.5)]
+        value = ci.collect.forwarded_cpu_window(samples, 125_000_000)
+        self.assertAlmostEqual(.996, value["cpu_seconds_lower_bound"])
+        self.assertAlmostEqual(1., value["cpu_seconds_per_forwarded_gbit"])
+        self.assertIsNone(ci.collect.forwarded_cpu_window(samples, 0)["cpu_seconds_per_forwarded_gbit"])
+
     def test_required_workloads_fail_when_topology_is_unavailable(self):
         for required in (False, True):
             with self.subTest(required=required), tempfile.TemporaryDirectory() as directory:
@@ -125,6 +180,14 @@ class Laboratory(unittest.TestCase):
             for record in records:
                 self.assertTrue(record["passed"], record)
                 self.assertGreater(record["cpu"]["proxy0"]["cpu_seconds"], 0)
+                for boundary in record["measurement"]["proxy_counter_snapshots"]["proxy0"].values():
+                    self.assertLessEqual(boundary["cpu_before"]["sample_ns"], boundary["requested_ns"])
+                    self.assertLessEqual(boundary["requested_ns"], boundary["sampled_ns"])
+                    self.assertLessEqual(boundary["sampled_ns"], boundary["cpu_after"]["sample_ns"])
+                cpu_window = record["cpu_forwarded_window"]
+                self.assertGreaterEqual(cpu_window["cpu_seconds_upper_bound"], cpu_window["cpu_seconds_lower_bound"])
+                if not cpu_window["available"]:
+                    self.assertIsNone(ci.metric(record, "cpu_gbit"))
                 self.assertGreater(record["dataplane"]["drive_calls"], 0)
                 self.assertGreater(record["dataplane"]["recv_bytes"] + record["dataplane"].get("splice_read_bytes", 0), 0)
                 self.assertEqual(0, record["after_drain"][0]["stats"]["active"])

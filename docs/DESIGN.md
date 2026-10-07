@@ -426,7 +426,13 @@ The benchmark coordinator establishes and warms all persistent streams before it
 ready/go barrier. It samples proxy, generator and origin CPU around the payload
 window, records boundary skew and tail drain separately, and verifies reclamation.
 Both baseline and candidate use the same harness on the same runner, alternating
-order across repetitions. Optional perf counters are gated at these boundaries;
+order across repetitions. Optional perf counters are gated at these boundaries.
+Each proxy's SIGUSR1 counter capture is bracketed by CPU samples. Interior/exterior
+CPU deltas give lower/upper bounds for the byte-counter interval, with tick
+quantization accounted for if schedstat is unavailable. CPU/Gbit uses the upper
+bound only when its uncertainty is at most 1%; wider bounds retain raw evidence
+but no normalized point metric. Multiple proxies sum bounds before this gate.
+Perf encloses counter collection and includes its diagnostic overhead;
 capability failures remain explicit missing measurements. Metrics builds and perf
 recording are diagnostic variants, with ordinary fast results retained
 separately for performance comparisons.

@@ -7,6 +7,8 @@ import platform
 import time
 from pathlib import Path
 
+MAX_CPU_WINDOW_RELATIVE_UNCERTAINTY = .01
+
 
 def cpu_topology(cpus):
     topology = {}
@@ -66,6 +68,52 @@ def difference(before, after, forwarded_bytes=None, peak_rss=None):
               "threads": after["threads"], "fds": after["fds"]}
     for key in ("voluntary_switches", "involuntary_switches", "minor_faults", "major_faults", "cpu_migrations", "runqueue_ns", "timeslices"):
         result[key] = after[key] - before[key] if before[key] is not None and after[key] is not None else None
+    return result
+
+
+def forwarded_cpu_window(samples, forwarded_bytes):
+    """Normalize an enclosing CPU bound only when the boundary error is small."""
+    lower = sum(s["cpu_seconds_lower_bound"] for s in samples)
+    upper = sum(s["cpu_seconds_upper_bound"] for s in samples)
+    uncertainty = upper - lower
+    relative = uncertainty / upper if upper > 0 else None
+    usable = bool(samples and forwarded_bytes and relative is not None
+                  and relative <= MAX_CPU_WINDOW_RELATIVE_UNCERTAINTY)
+    return dict(cpu_seconds_lower_bound=lower, cpu_seconds_upper_bound=upper,
+                boundary_uncertainty_seconds=uncertainty, relative_uncertainty=relative,
+                maximum_relative_uncertainty=MAX_CPU_WINDOW_RELATIVE_UNCERTAINTY,
+                normalization="upper CPU bound over SIGUSR1 forwarded-byte windows",
+                available=usable,
+                reason=None if usable else "no CPU/forwarded bytes or boundary uncertainty exceeds 1%",
+                cpu_seconds_per_forwarded_gbit=upper / (forwarded_bytes * 8 / 1e9) if usable else None)
+
+
+def counter_window(before, after, forwarded_bytes, peak_rss=None):
+    """CPU samples bracket each SIGUSR1 counter capture without interpolation."""
+    samples = [before["cpu_before"], before["cpu_after"], after["cpu_before"], after["cpu_after"]]
+    times = [s["sample_ns"] for s in samples]
+    if times != sorted(times):
+        raise ValueError("CPU counter-window samples are out of order")
+    for boundary in (before, after):
+        if not (boundary["cpu_before"]["sample_ns"] <= boundary["requested_ns"]
+                <= boundary["sampled_ns"] <= boundary["cpu_after"]["sample_ns"]):
+            raise ValueError("CPU samples do not enclose the counter capture")
+    schedstat = all(s["runtime_ns"] is not None for s in samples)
+    unit = 1e9 if schedstat else os.sysconf("SC_CLK_TCK")
+    values = [s["runtime_ns"] if schedstat else s["user_ticks"] + s["system_ticks"] for s in samples]
+    if values != sorted(values):
+        raise ValueError("CPU counters moved backwards")
+    # Two separately quantized tick counters can each differ by one tick.
+    margin = 0 if schedstat else 2 / unit
+    lower = max(0, (values[2] - values[1]) / unit - margin)
+    upper = (values[3] - values[0]) / unit + margin
+    result = difference(samples[0], samples[3], peak_rss=peak_rss)
+    result.update(cpu_seconds=(values[3] - values[0]) / unit,
+                  cpu_source="schedstat" if schedstat else "stat_ticks",
+                  cpu_seconds_lower_bound=lower, cpu_seconds_upper_bound=upper,
+                  boundary_uncertainty_seconds=upper - lower)
+    result["cpu_percent_one_core"] = result["cpu_seconds"] / result["seconds"] * 100 if result["seconds"] else None
+    result["cpu_seconds_per_forwarded_gbit"] = forwarded_cpu_window([result], forwarded_bytes)["cpu_seconds_per_forwarded_gbit"]
     return result
 
 
