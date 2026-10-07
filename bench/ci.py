@@ -591,6 +591,8 @@ def main():
     parser.add_argument("--workloads", default=DEFAULT_CASES)
     parser.add_argument("--rings", default="65536")
     parser.add_argument("--processes", type=int, default=1)
+    parser.add_argument("--require-workloads", action="store_true",
+                        help="fail instead of skipping when the requested CPU topology is unavailable")
     parser.add_argument("--profiling", choices=("basic", "perf-stat", "perf-record"), default="basic")
     parser.add_argument("--options", default="{}", help="JSON: chunk_bytes, inflight_bytes, warmup, variants, drain_timeout, baseline_ring")
     args = parser.parse_args()
@@ -692,13 +694,15 @@ def main():
     required_cpus = args.topology_processes + 1 + workers_needed
     if len(cpus) < required_cpus and (args.topology_processes > 1 or workers_needed > 1):
         skipped = dict(available=False, reason="insufficient distinct CPUs for proxies, origin and generator",
-                       requested_proxy_processes=args.topology_processes, available_cpus=cpus)
+                       requested_proxy_processes=args.topology_processes, available_cpus=cpus,
+                       required_workloads=args.require_workloads)
         (args.output / "scale-out-unavailable.json").write_text(json.dumps(skipped, indent=2) + "\n")
         print(json.dumps(dict(event="scale_out", **skipped)), flush=True)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
-                output.write(f"Scale-out skipped: proxies, origin and generators need {required_cpus} distinct CPUs; {len(cpus)} available.\n")
-        return 0
+                status = "Required workloads unavailable" if args.require_workloads else "Scale-out skipped"
+                output.write(f"{status}: proxies, origin and generators need {required_cpus} distinct CPUs; {len(cpus)} available.\n")
+        return int(args.require_workloads)
     os.sched_setaffinity(0, {cpus[min(required_cpus, len(cpus) - 1)]})
     records = []
     try:

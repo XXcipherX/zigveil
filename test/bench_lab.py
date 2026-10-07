@@ -20,6 +20,24 @@ NORMAL = NATIVE = None
 
 
 class Laboratory(unittest.TestCase):
+    def test_required_workloads_fail_when_topology_is_unavailable(self):
+        for required in (False, True):
+            with self.subTest(required=required), tempfile.TemporaryDirectory() as directory:
+                argv = [ci.__file__, "--binary", "/unused/zigveil", "--duration", "1", "--repeats", "1",
+                        "--workloads", "bulk:10", "--options", '{"generator_workers":2}', "--output", directory]
+                if required:
+                    argv.append("--require-workloads")
+                with patch.object(sys, "argv", argv), patch.object(os, "sched_getaffinity", return_value={0}), patch.object(
+                        ci.collect, "cpu_topology", return_value={}), patch.object(
+                        ci.resource, "getrlimit", return_value=(32768, 32768)), patch.dict(os.environ, {}, clear=True), patch(
+                        "builtins.print"):
+                    status = ci.main()
+                self.assertEqual(int(required), status)
+                unavailable = json.loads((Path(directory) / "scale-out-unavailable.json").read_text())
+                self.assertFalse(unavailable["available"])
+                self.assertEqual(required, unavailable["required_workloads"])
+                self.assertEqual([], list(Path(directory).glob("*/record.json")))
+
     def test_production_binary_omits_diagnostic_json(self):
         if NORMAL is None:
             self.skipTest("supply --normal-binary")

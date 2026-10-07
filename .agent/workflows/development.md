@@ -40,6 +40,9 @@ test, fuzz and optional benchmark-tool build. The default ordinary build is base
 Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
 Linux CI is reusable by publication and checks that publication's exact commit
 before registry builds/uploads. Keep standalone and caller CI concurrency separate.
+Mandatory shared-splice workloads use --require-workloads, so topology refusal
+cannot pass CI. Use one generator there to keep correctness coverage executable
+on smaller runners; separate performance experiments may require more distinct CPUs.
 Logging changes verify live levels, SIGUSR1/USR2, idle suppression, grouped rate
 limits, bounded escaping/units and unchanged JSON counters through actual sockets.
 Keep daemon readiness independent of log verbosity.

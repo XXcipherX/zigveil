@@ -55,6 +55,10 @@ sizes measure the combined code/configuration change.
 Use `processes=2` for independent `SO_REUSEPORT` proxies. Each proxy, generator
 and origin needs a distinct logical CPU. Four proxies need at least six available CPUs.
 Insufficient capacity is recorded as an unavailable scaling experiment.
+Pass `--require-workloads` to `bench/ci.py` when execution is mandatory: unavailable
+CPU topology then exits nonzero. Linux CI uses this flag and one generator for its
+shared-splice correctness workloads, including 1000 connections. Optional manual
+scale-out experiments retain the unavailable result when their topology cannot run.
 For a paired 1→2 process comparison, build the same revision on both sides,
 select `processes=2` and `options={"baseline_processes":1}`. Generator/origin keep
 the same CPUs across both variants; the summary reports scaling efficiency.

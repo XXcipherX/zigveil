@@ -130,8 +130,8 @@ jobs:
           zig build -Doptimize=fast -Drelay_splice=true -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --splice --diagnostics
           python3 bench/ci.py --binary zig-out/bin/zigveil --metrics-binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench \
-            --duration 1 --repeats 1 --workloads bulk:1000,loaded-latency:10,churn:1 --rings 65536 --profiling basic \
-            --options '{"variants":["metrics"],"relay_splice":true,"generator_workers":2,"origin_io":"splice","warmup":0.05}' \
+            --duration 1 --repeats 1 --workloads bulk:1000,loaded-latency:10,churn:1 --rings 65536 --profiling basic --require-workloads \
+            --options '{"variants":["metrics"],"relay_splice":true,"generator_workers":1,"origin_io":"splice","warmup":0.05}' \
             --output "$RUNNER_TEMP/shared-splice-checks"
   docker:
     name: Docker ${{ matrix.arch }} ${{ matrix.mode }}
