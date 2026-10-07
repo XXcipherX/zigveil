@@ -53,12 +53,15 @@ python3 test/integration.py --binary zig-out/bin/zigveil
 `zig build` also supports debug and safe. An explicit target can be supplied
 with `-Dtarget=x86_64-linux`. The build rejects other operating systems and Zig
 versions. No package manifest is needed because the build has no dependencies.
+The default build uses a portable baseline CPU. Select `-Dcpu=x86_64_v3` explicitly
+for that x86_64 profile; `-Dcpu=native` targets the build host's CPU.
 Integration tests use Python 3 and OpenSSL; neither is required by the daemon.
 
 GitHub Actions verifies formatting, builds debug, safe and fast, runs
 deterministic unit tests in all three modes, runs parser mutations with safety
-checks, exercises real Linux sockets in debug and fast, and smoke-tests the benchmark tools on native amd64
-and arm64 runners. It also exercises fast/safe Docker images for amd64, arm64 and
+checks, exercises real Linux sockets in debug and fast, and smoke-tests the benchmark
+tools on native runners with amd64/arm64 baseline and amd64 `x86_64_v3` CPU settings.
+It also exercises fast/safe Docker images for amd64, arm64 and
 amd64-v3, checks PIE and verifies the Compose installer/update flow. Zig is fetched from its official release with
 a pinned SHA-256 checksum.
 

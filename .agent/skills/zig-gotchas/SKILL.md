@@ -20,6 +20,8 @@ Check the installed 0.17.0 standard library or the tagged official source before
 using a new API. ArrayList and std.Io APIs differ from older Zig releases.
 Use `std.lang.Optimize` and the canonical `debug/safe/fast/small` names. The build
 requires the exact stable release; prerelease/build suffixes are rejected.
+`standardTargetOptions` defaults to a baseline CPU model. CI passes each production
+CPU explicitly to every Zig build step; native CPU detection is an opt-in profile.
 Reflection uses `field_names`/`field_types`/`field_attrs`, with parallel iteration
 when names and types are both needed. Use `@splat` for repeated arrays,
 `@backingInt`/`@fromBackingInt` for enum backing values, `std.mem.print` for fixed

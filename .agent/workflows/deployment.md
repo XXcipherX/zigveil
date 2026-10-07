@@ -18,6 +18,8 @@ verify real traffic after configuration changes. Selected backend failures never
 ## Image publication and Compose
 
 `Dockerfile` builds native Linux amd64/arm64 images with verified Zig 0.17.0 archives.
+Generic images and ordinary builds use baseline CPU requirements. Full Linux CI
+also validates amd64 x86_64_v3; keep each production CPU profile in that matrix.
 The publish workflow builds by digest on native Ubuntu 26.04 runners, verifies
 runtime behavior and runnable platforms, then publishes the selected/latest/SHA
 tags. Optional amd64-v3 images require compatible CPU flags. Use current action

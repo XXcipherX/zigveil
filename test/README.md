@@ -97,6 +97,8 @@ stream bytes, clean FIN and a single serving thread after resolver teardown.
 No external DNS service is required. CI runs this suite in both build modes on
 both architectures. The ordinary integration suite also checks localhost routes
 and fallback.
+Full Linux CI uses explicit baseline CPUs on amd64/arm64 and also runs the suite
+on amd64 x86_64_v3, matching the production image profiles.
 DNS regressions also cover oversized/invalid search candidates, valid search,
 absolute names and hosts precedence without a public resolver. Zero DNS attempts
 must fail startup/check before queries; hosts and localhost still bypass DNS.

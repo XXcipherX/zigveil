@@ -11,21 +11,30 @@ concurrency:
   cancel-in-progress: true
 jobs:
   linux:
-    name: Linux ${{ matrix.arch }}
+    name: Linux ${{ matrix.arch }} ${{ matrix.cpu }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
+            cpu: baseline
             runner: ubuntu-26.04
             zig_arch: x86_64
             zig_sha: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
           - arch: arm64
+            cpu: baseline
             runner: ubuntu-26.04-arm
             zig_arch: aarch64
             zig_sha: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+          - arch: amd64
+            cpu: x86_64_v3
+            runner: ubuntu-26.04
+            zig_arch: x86_64
+            zig_sha: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    env:
+      ZIGVEIL_CPU: ${{ matrix.cpu }}
     steps:
       - uses: actions/checkout@v7
       - name: Zig 0.17.0 from the official release (verified SHA-256)
@@ -49,20 +58,20 @@ jobs:
         id: debug
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
-          zig build
+          zig build -Dcpu="$ZIGVEIL_CPU"
           readelf -h zig-out/bin/zigveil | grep -E 'Type:.*DYN'
       - name: Deterministic unit tests
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
-        run: zig build test
+        run: zig build test -Dcpu="$ZIGVEIL_CPU"
       - name: Parser mutations with safety checks
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
-        run: zig build fuzz -Doptimize=safe
+        run: zig build fuzz -Doptimize=safe -Dcpu="$ZIGVEIL_CPU"
       - name: safe build and unit tests
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
-          zig build -Doptimize=safe --prefix "$RUNNER_TEMP/safe"
+          zig build -Doptimize=safe -Dcpu="$ZIGVEIL_CPU" --prefix "$RUNNER_TEMP/safe"
           readelf -h "$RUNNER_TEMP/safe/bin/zigveil" | grep -E 'Type:.*DYN'
-          zig build test -Doptimize=safe
+          zig build test -Doptimize=safe -Dcpu="$ZIGVEIL_CPU"
       - name: Python syntax and benchmark harness smoke
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
@@ -78,9 +87,9 @@ jobs:
         id: release
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
-          zig build -Doptimize=fast
+          zig build -Doptimize=fast -Dcpu="$ZIGVEIL_CPU"
           readelf -h zig-out/bin/zigveil | grep -E 'Type:.*DYN'
-          zig build test -Doptimize=fast
+          zig build test -Doptimize=fast -Dcpu="$ZIGVEIL_CPU"
       - name: fast Linux socket integration
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         run: python3 test/integration.py --binary zig-out/bin/zigveil
@@ -95,10 +104,10 @@ jobs:
       - name: Compile-time diagnostics and laboratory regressions
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
-          zig build test -Ddataplane_metrics=true
-          zig build test -Doptimize=fast -Ddataplane_metrics=true
+          zig build test -Ddataplane_metrics=true -Dcpu="$ZIGVEIL_CPU"
+          zig build test -Doptimize=fast -Ddataplane_metrics=true -Dcpu="$ZIGVEIL_CPU"
           cp zig-out/bin/zigveil "$RUNNER_TEMP/zigveil-normal"
-          zig build -Doptimize=fast -Ddataplane_metrics=true -Dbench_tools=true
+          zig build -Doptimize=fast -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
           ulimit -n 32768
           timeout 120s python3 test/bench_harness.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
@@ -107,18 +116,18 @@ jobs:
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
           ulimit -n 32768
-          zig build test -Drelay_splice=false
-          zig build test -Doptimize=safe -Drelay_splice=false
-          zig build test -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true
-          zig build -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true -Dbench_tools=true
+          zig build test -Drelay_splice=false -Dcpu="$ZIGVEIL_CPU"
+          zig build test -Doptimize=safe -Drelay_splice=false -Dcpu="$ZIGVEIL_CPU"
+          zig build test -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true -Dcpu="$ZIGVEIL_CPU"
+          zig build -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
           python3 test/bench_lab.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
       - name: Shared splice ownership and spill correctness
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
         run: |
           ulimit -n 32768
-          zig build test -Doptimize=safe -Ddataplane_metrics=true
-          zig build -Doptimize=fast -Drelay_splice=true -Ddataplane_metrics=true -Dbench_tools=true
+          zig build test -Doptimize=safe -Ddataplane_metrics=true -Dcpu="$ZIGVEIL_CPU"
+          zig build -Doptimize=fast -Drelay_splice=true -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --splice --diagnostics
           python3 bench/ci.py --binary zig-out/bin/zigveil --metrics-binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench \
             --duration 1 --repeats 1 --workloads bulk:1000,loaded-latency:10,churn:1 --rings 65536 --profiling basic \

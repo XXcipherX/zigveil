@@ -34,6 +34,9 @@ python3 test/bench_harness.py --binary zig-out/bin/zigveil
 Docker/deployment changes additionally require shell syntax/lint, native image
 builds, `python3 test/docker_smoke.py --image IMAGE`, and the Compose installer E2E
 on a disposable systemd host. The normal CI runs these checks on amd64/arm64.
+Full Linux validation explicitly selects amd64/arm64 baseline and amd64
+x86_64_v3, matching production image profiles. Pass the matrix CPU to every build,
+test, fuzz and optional benchmark-tool build. The default ordinary build is baseline.
 Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
 Linux CI is reusable by publication and checks that publication's exact commit
 before registry builds/uploads. Keep standalone and caller CI concurrency separate.
