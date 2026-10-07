@@ -325,6 +325,9 @@ Shutdown stops accepts and drains for 30 seconds; the next signal requests an
 immediate stop. SIGUSR1 requests totals, while SIGUSR2 cycles runtime verbosity.
 Diagnostics use fixed-buffer stderr writes and need a functioning sink.
 There is no packet logging or HTTP admin server.
+The Compose installer updates by recreating its container. New accepts pause
+through the old process's drain and replacement startup; existing streams that
+outlive the 30-second drain deadline close. This deployment permits that pause.
 
 ## Socket error observability
 

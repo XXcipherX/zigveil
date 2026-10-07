@@ -261,6 +261,12 @@ parents must be root-owned and not writable by other users; symlinked lock files
 are refused. Pull/preflight failure keeps the running service and deployment files
 intact. Re-run the installer to update the image:
 
+Updates recreate the container. New connections pause from the old listener's
+shutdown until the replacement is ready. Existing connections get up to 30
+seconds to drain; those still active at the deadline close. The pause can include
+that drain interval and the new process's startup time. Schedule updates when
+this interruption is acceptable.
+
 ```sh
 sudo bash deploy/install_docker_compose.sh
 systemctl status zigveil --no-pager
