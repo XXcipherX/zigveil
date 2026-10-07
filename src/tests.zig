@@ -10,6 +10,7 @@ test {
     _ = @import("linux_io.zig");
     _ = @import("counters.zig");
     _ = @import("backend.zig");
+    _ = @import("startup_dns.zig");
     _ = @import("log.zig");
     _ = @import("metrics.zig");
 }

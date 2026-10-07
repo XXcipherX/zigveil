@@ -56,6 +56,7 @@ There is no speculative backend/worker abstraction.
 | `main.zig` | CLI, bounded config input, startup arena and daemon lifetime |
 | `config.zig` | Immutable validated routes and numeric endpoints |
 | `backend.zig` | IP/hostname endpoint syntax and startup-only name resolution |
+| `startup_dns.zig` | Hosts/localhost lookup and bounded DNS search/query construction |
 | `name.zig` | Owned canonical hostname and ASCII syntax rules |
 | `client_hello.zig` | Pure bytes-to-verdict parser and bounded wire cursor |
 | `proxy_protocol.zig` | Bounded fallback-only PROXY v2 encoding of socket endpoints |
@@ -121,7 +122,11 @@ The listener remains numeric. `Config.parseWithResolver` substitutes only startu
 lookup for unit tests; the production route/relay types still contain numeric
 `IpAddress` values.
 
-Zig 0.17.0 `HostName.lookup` uses `/etc/hosts` and the Linux resolver configuration.
+The startup lookup uses Zig 0.17.0 networking/DNS types with project-owned
+search-name bounds. It reads `/etc/hosts` first, handles localhost, then takes one
+Linux resolver configuration snapshot for all search candidates and queries.
+Invalid or overlong composed names are skipped before copying/query encoding;
+valid search/ndots behavior and the final bare-name lookup are preserved.
 Each configured hostname resolves once before bind, including `--check`. Lookup
 errors prevent startup. The first IPv4 answer is selected, otherwise the first IPv6;
 mapped IPv4 counts as IPv4. The selected address is checked for unicast and self

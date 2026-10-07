@@ -97,6 +97,8 @@ stream bytes, clean FIN and a single serving thread after resolver teardown.
 No external DNS service is required. CI runs this suite in both build modes on
 both architectures. The ordinary integration suite also checks localhost routes
 and fallback.
+DNS regressions also cover oversized/invalid search candidates, valid search,
+absolute names and hosts precedence without a public resolver.
 
 ```sh
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil

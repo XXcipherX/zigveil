@@ -96,6 +96,9 @@ IP undergoes the same unicast and self-target validation as a numeric backend.
 Resolution finishes and its worker exits before listening. Serving performs no
 DNS lookup, address rotation or retry across alternative addresses; restart to
 pick up DNS changes. `--check` verifies resolution and config, not TCP reachability.
+Relative names follow the resolver's search/ndots settings. Invalid or overlong
+search candidates are skipped before DNS query construction; the original name
+is still tried. Each lookup uses one resolver configuration snapshot.
 
 ```sh
 # Default capacity needs at least 2060 fds; keep room for the service environment.

@@ -2,6 +2,7 @@
 const std = @import("std");
 const Address = std.Io.net.IpAddress;
 const HostName = std.Io.net.HostName;
+const startup_dns = @import("startup_dns.zig");
 
 pub const Endpoint = union(enum) {
     address: Address,
@@ -81,7 +82,7 @@ pub const Resolver = struct {
         const name: HostName = .{ .bytes = name_buffer[0..host.bytes.len] };
         var results_buffer: [16]HostName.LookupResult = undefined;
         var results: std.Io.Queue(HostName.LookupResult) = .init(&results_buffer);
-        var lookup = try io.concurrent(HostName.lookup, .{ name, io, &results, HostName.LookupOptions{ .port = port } });
+        var lookup = try io.concurrent(startup_dns.lookup, .{ name, io, &results, port });
         defer lookup.cancel(io) catch {};
         var selection: Selection = .{};
         while (results.getOne(io)) |result| {

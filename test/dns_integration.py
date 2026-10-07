@@ -75,12 +75,13 @@ class NameServer:
 
 
 @contextlib.contextmanager
-def namespace(server, hosts_text=""):
+def namespace(server, hosts_text="", options="timeout:1 attempts:1", search=""):
     with tempfile.TemporaryDirectory() as directory:
         hosts = Path(directory) / "hosts"
         resolv = Path(directory) / "resolv.conf"
         hosts.write_text(hosts_text, encoding="ascii")
-        resolv.write_text(f"nameserver {server.address}\noptions timeout:1 attempts:1\n", encoding="ascii")
+        resolv.write_text(f"nameserver {server.address}\noptions {options}\n"
+                          + (f"search {search}\n" if search else ""), encoding="ascii")
         # Only this child's mount namespace sees these files; the host is unchanged.
         script = 'mount --bind "$1" /etc/hosts; mount --bind "$2" /etc/resolv.conf; shift 2; exec "$@"'
         yield ["unshare", "--mount", "--propagation", "private", "sh", "-eu", "-c", script,
@@ -118,6 +119,25 @@ class DnsIntegration(unittest.TestCase):
             with Daemon(origin.address, launch_prefix=prefix, routes=[], fallback=f"{name}.:{origin.port}") as proxy:
                 self.transfer(proxy)
                 self.assertEqual({(name, 1), (name, 28)}, set(dns.requests))
+
+    def test_overlong_search_candidate_is_skipped_before_bare_lookup(self):
+        name = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 30))
+        with NameServer() as dns, namespace(dns, options="timeout:1 attempts:1 ndots:5", search="e" * 40) as prefix, Origin() as origin:
+            dns.records[name] = ["127.0.0.1"]
+            with Daemon(f"{name}:{origin.port}", launch_prefix=prefix) as proxy:
+                self.transfer(proxy)
+            self.assertEqual({(name, 1), (name, 28)}, set(dns.requests))
+
+    def test_valid_search_then_absolute_name_and_hosts_bypass(self):
+        with NameServer() as dns, Origin() as origin:
+            dns.records["backend.example.test"] = ["127.0.0.1"]
+            for endpoint, hosts in (("backend", ""), ("backend.example.test.", ""),
+                                    ("backend", "127.0.0.1 BACKEND\n")):
+                dns.requests.clear()
+                with namespace(dns, hosts, search="bad..suffix example.test") as prefix:
+                    with Daemon(f"{endpoint}:{origin.port}", launch_prefix=prefix) as proxy:
+                        self.transfer(proxy)
+                self.assertEqual(set() if hosts else {("backend.example.test", 1), ("backend.example.test", 28)}, set(dns.requests))
 
     def test_large_hosts_answer_list_is_drained_without_dns_or_worker_leaks(self):
         with NameServer() as dns, Origin() as origin:

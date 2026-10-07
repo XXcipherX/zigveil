@@ -10,8 +10,8 @@ description: Zig 0.17.0 API and Linux syscall details relevant to this project's
 - `std.process.Init.Minimal`: argv/env without automatic std.Io.Threaded startup.
 - `init.args.toSlice(allocator)`: startup-owned argument slices.
 - `std.Io.net.IpAddress.parseLiteral`: IPv4 `IP:port`, IPv6 `[IP]:port`.
-- `std.Io.net.HostName.lookup`: startup lookup into an Io.Queue; join its future
-  before releasing buffers. A bounded queue must be drained while lookup produces.
+- `startup_dns.lookup`: project-owned bounded lookup using Zig networking/DNS types;
+  join its future before releasing buffers. Drain the bounded queue while it produces.
 - `std.os.linux`: raw errno-encoded syscall results; always call `linux.errno(rc)`.
 - `std.Build.createModule` plus `addExecutable(.{ .root_module = ... })`.
 - `std.json.parseFromSlice`: reject unknown fields; retain parsed owner through serving.
@@ -28,6 +28,9 @@ format buffers, `std.mem.find`/`findScalar` for search and `@memmove` for overla
 The startup resolver uses one explicit concurrent worker and destroys its
 `std.Io.Threaded` instance before Server.init. Do not set the executable's
 single_threaded compile option or move resolver operations into the relay.
+Keep composed search names within HostName/DNS bounds before slicing. Pass the
+same resolver snapshot to search and transport; a separate preflight followed by
+an unchecked std lookup would read a second, potentially changed configuration.
 
 ## Integer and slice safety
 

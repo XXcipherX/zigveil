@@ -39,6 +39,9 @@ bounded result queue and is joined before bind. The first IPv4, otherwise first
 IPv6, is validated and stored as a numeric endpoint. Keep DNS resources and lookup
 out of the serving path; changes to DNS require a restart. `--check` resolves names
 but does not connect. Preserve unicast/self-target checks after resolution.
+`startup_dns.zig` checks composed search names before copying or query encoding,
+using one resolver snapshot per lookup. Preserve hosts/localhost precedence and
+absolute names; skip invalid/overlong search candidates without querying them.
 
 ## State transitions
 
