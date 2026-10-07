@@ -671,6 +671,8 @@ def main():
                     candidate_sha=os.environ.get("GITHUB_SHA"), build_mode=os.environ.get("BENCH_BUILD_MODE"),
                     baseline_zig_version=os.environ.get("BENCH_BASELINE_ZIG_VERSION"),
                     baseline_build_mode=os.environ.get("BENCH_BASELINE_BUILD_MODE"),
+                    candidate_build_cpu=args.build_cpu,
+                    baseline_build_cpu=os.environ.get("BENCH_BASELINE_CPU") if args.baseline else None,
                     candidate_zig_version=os.environ.get("BENCH_ZIG_VERSION"),
                     cpu_model=read_optional("/proc/cpuinfo"), architecture=platform.machine(), cpu_count=os.cpu_count(),
                     affinity=cpus, kernel=platform.release(), python=platform.python_version(), zig_version=os.environ.get("BENCH_ZIG_VERSION"),

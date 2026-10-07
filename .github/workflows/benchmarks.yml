@@ -101,10 +101,11 @@ jobs:
           extra=()
           splice=$(python3 -c 'import json,os; v=json.loads(os.environ["BENCH_OPTIONS"]).get("baseline_splice"); assert v is None or type(v) is bool; print("" if v is None else str(v).lower())')
           if [[ -n "$splice" ]]; then extra+=(-Drelay_splice="$splice"); fi
-          zig build -Doptimize=fast -Dcpu=baseline "${extra[@]}" --prefix "$RUNNER_TEMP/baseline"
+          zig build -Doptimize=fast -Dcpu="$BENCH_CPU" "${extra[@]}" --prefix "$RUNNER_TEMP/baseline"
           echo "BENCH_BASELINE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "BENCH_BASELINE_ZIG_VERSION=$(zig version)" >> "$GITHUB_ENV"
           echo "BENCH_BASELINE_BUILD_MODE=fast" >> "$GITHUB_ENV"
+          echo "BENCH_BASELINE_CPU=$BENCH_CPU" >> "$GITHUB_ENV"
       - name: Build optional diagnostic fast
         if: inputs.instrumentation
         run: zig build -Doptimize=fast -Dcpu="$BENCH_CPU" -Drelay_splice="$BENCH_SPLICE" -Ddataplane_metrics=true --prefix "$RUNNER_TEMP/metrics"
@@ -124,8 +125,9 @@ jobs:
         run: |
           set -euo pipefail
           extra=()
-          printf 'Candidate: Zig %s, %s\nBaseline: Zig %s, %s\n' \
-            "$BENCH_ZIG_VERSION" "$BENCH_BUILD_MODE" "${BENCH_BASELINE_ZIG_VERSION:-none}" "${BENCH_BASELINE_BUILD_MODE:-none}" \
+          printf 'Candidate: Zig %s, %s, CPU %s\nBaseline: Zig %s, %s, CPU %s\n' \
+            "$BENCH_ZIG_VERSION" "$BENCH_BUILD_MODE" "$BENCH_CPU" \
+            "${BENCH_BASELINE_ZIG_VERSION:-none}" "${BENCH_BASELINE_BUILD_MODE:-none}" "${BENCH_BASELINE_CPU:-none}" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           if [[ "$HAVE_BASELINE" == true ]]; then extra+=(--baseline "$RUNNER_TEMP/baseline/bin/zigveil"); fi
           if [[ "$HAVE_METRICS" == true ]]; then extra+=(--metrics-binary "$RUNNER_TEMP/metrics/bin/zigveil"); fi

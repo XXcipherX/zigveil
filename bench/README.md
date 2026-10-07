@@ -29,6 +29,8 @@ binary; both are the defaults. Profiling defaults to `basic`; `perf-stat` and
 `perf-record` are explicit diagnostic choices. For a code comparison, supply the
 full production commit immediately before the change. That revision must support
 Zig 0.17.0. Match baseline/candidate configuration to isolate the code change.
+Actions passes the same explicit CPU profile to candidate, baseline and diagnostic
+builds. Raw metadata and the job summary record both comparison CPU profiles.
 
 | JSON option | Default | Purpose |
 | --- | --- | --- |
@@ -43,7 +45,7 @@ Zig 0.17.0. Match baseline/candidate configuration to isolate the code change.
 | `origin_io` | `buffered` | Native echo via its reference queue or a single shared `splice` pipe with bounded queue fallback |
 | `baseline_ring` | candidate ring | Explicit old ring for comparing default configurations |
 | `baseline_processes` | candidate process count | Paired scale-out with identical baseline/candidate code |
-| `cpu` | `baseline` | Candidate code generation: `baseline`, `native`, or `x86_64_v3` on amd64 |
+| `cpu` | `baseline` | CPU profile for both comparison builds: `baseline`, `native`, or `x86_64_v3` on amd64 |
 | `relay_splice` | true | Production splice path; false provides a buffered control |
 | `baseline_splice` | baseline build default | Explicit splice build option for comparisons with a revision supporting it |
 

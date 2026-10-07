@@ -76,7 +76,9 @@ Run `test/bench_lab.py` against an instrumented binary and instrumented unit tes
 debug, safe and fast. safe unit coverage also checks the
 buffered control. For structural dataplane changes, select an explicit production
 baseline compatible with Zig 0.17.0 and compare ordinary fast builds using the same
-compiler. Baseline and diagnostic benchmark builds are opt-in. Repeat and localize
-any sustained regression; inspect generated code when that diagnosis requires it.
+compiler. Keep the same explicit CPU profile on candidate, baseline and diagnostic
+builds; record both comparison profiles in metadata and the summary. Baseline and
+diagnostic benchmark builds are opt-in. Repeat and localize any sustained regression;
+inspect generated code when that diagnosis requires it.
 Keep one-off profiles, disassembly and measurement output in CI artifacts or an
 ignored results directory, outside the maintained source and documentation.
