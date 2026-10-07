@@ -31,6 +31,8 @@ single_threaded compile option or move resolver operations into the relay.
 Keep composed search names within HostName/DNS bounds before slicing. Pass the
 same resolver snapshot to search and transport; a separate preflight followed by
 an unchecked std lookup would read a second, potentially changed configuration.
+The std resolver parser accepts `attempts:0`; reject it before DNS socket setup or
+retry-time division. Preserve hosts/localhost precedence over resolver settings.
 
 ## Integer and slice safety
 

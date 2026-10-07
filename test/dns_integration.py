@@ -146,6 +146,38 @@ class DnsIntegration(unittest.TestCase):
                 self.transfer(proxy)
                 self.assertFalse(dns.requests)
 
+    def test_zero_dns_attempts_is_config_error_before_bind(self):
+        with NameServer() as dns, namespace(dns, options="timeout:1 attempts:0 ndots:2", search="example.test") as prefix, tempfile.TemporaryDirectory() as directory:
+            dns.records["backend.example.test"] = ["127.0.0.1"]
+            for host in ("backend", "backend.example.test."):
+                for fallback in (False, True):
+                    port = free_port()
+                    config = {"listen": f"0.0.0.0:{port}", "routes": [], "max_connections": 4, "max_handshakes": 2}
+                    if fallback:
+                        config["fallback"] = f"{host}:443"
+                    else:
+                        config["routes"] = [{"sni": "example.com", "backend": f"{host}:443"}]
+                    path = Path(directory) / "config.json"
+                    path.write_text(json.dumps(config), encoding="utf-8")
+                    for flags in ([], ["--check"]):
+                        with self.subTest(host=host, fallback=fallback, flags=flags):
+                            result = subprocess.run([*prefix, integration.BINARY, *flags, str(path)],
+                                                    capture_output=True, timeout=5)
+                            self.assertNotEqual(0, result.returncode)
+                            self.assertIn(b"invalid config", result.stderr)
+                            self.assertIn(b"InvalidDnsAttempts", result.stderr)
+                            self.assertNotIn(b"listening on", result.stderr)
+            self.assertFalse(dns.requests)
+
+    def test_hosts_and_localhost_do_not_require_dns_attempts(self):
+        with NameServer() as dns, Origin() as origin:
+            for endpoint, hosts in (("localhost", ""), ("backend.localhost.", ""),
+                                    ("backend.example.test", "127.0.0.1 backend.example.test\n")):
+                with namespace(dns, hosts, options="timeout:1 attempts:0") as prefix:
+                    with Daemon(f"{endpoint}:{origin.port}", launch_prefix=prefix) as proxy:
+                        self.transfer(proxy)
+            self.assertFalse(dns.requests)
+
     def test_dns_failures_and_resolved_self_targets_rejected_before_bind(self):
         with NameServer() as dns, namespace(dns) as prefix, tempfile.TemporaryDirectory() as directory:
             dns.records["self.example.test"] = ["127.0.0.1"]

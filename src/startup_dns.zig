@@ -18,6 +18,8 @@ pub fn lookup(name: HostName, io: Io, results: *Results, port: u16) !void {
     }
 
     const rc = HostName.ResolvConf.init(io) catch return error.ResolvConfParseFailed;
+    // The std parser accepts zero; reject it before timeout division or DNS I/O.
+    if (rc.attempts == 0) return error.InvalidDnsAttempts;
     const absolute = std.mem.endsWith(u8, name.bytes, ".");
     const bare = name.bytes[0 .. name.bytes.len - @intFromBool(absolute)];
     if (!absolute and std.mem.countScalar(u8, name.bytes, '.') < rc.ndots) {

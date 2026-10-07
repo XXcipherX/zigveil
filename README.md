@@ -99,6 +99,8 @@ pick up DNS changes. `--check` verifies resolution and config, not TCP reachabil
 Relative names follow the resolver's search/ndots settings. Invalid or overlong
 search candidates are skipped before DNS query construction; the original name
 is still tried. Each lookup uses one resolver configuration snapshot.
+`attempts:0` in `/etc/resolv.conf` fails DNS-dependent startup with
+`InvalidDnsAttempts`. Hosts-file and localhost matches do not need DNS settings.
 
 ```sh
 # Default capacity needs at least 2060 fds; keep room for the service environment.
