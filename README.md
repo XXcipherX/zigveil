@@ -218,7 +218,9 @@ The runtime contains the daemon and a small entrypoint, without a compiler.
 `--check`, `--help` and `--version` pass through without creating a config.
 
 Publish with **Actions → Publish Docker image → Run workflow**. The workflow
-builds on native Ubuntu 26.04 amd64/arm64 runners, pushes by digest, verifies each
+first runs the complete Linux CI workflow from the same commit. Only its success
+allows registry builds/uploads. It builds on native Ubuntu 26.04 amd64/arm64 runners,
+pushes by digest, verifies each
 image, then checks runnable platforms before applying tags. Published tags include
 the selected tag, optional `latest`, and `sha-<commit>`. An optional amd64 image
 uses the `x86_64_v3` CPU profile and receives the corresponding `-amd64-v3` tags.

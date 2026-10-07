@@ -22,6 +22,10 @@ The publish workflow builds by digest on native Ubuntu 26.04 runners, verifies
 runtime behavior and runnable platforms, then publishes the selected/latest/SHA
 tags. Optional amd64-v3 images require compatible CPU flags. Use current action
 major tags. Preserve digest validation and the publish gate for every requested build.
+Before any registry build/upload, call the full reusable Linux CI workflow from
+the publication commit. A green run for another commit is not sufficient. Keep
+CI concurrency groups distinct by entry workflow so publication validation cannot
+cancel standalone Linux CI, or be cancelled by it.
 
 The installer is `deploy/install_docker_compose.sh`. First install needs a full
 CONFIG_SOURCE or explicit SNI/BACKEND. Existing JSON is retained on updates. Pull,

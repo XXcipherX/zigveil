@@ -27,6 +27,11 @@ concurrency:
   group: docker-image
   cancel-in-progress: false
 jobs:
+  ci:
+    name: Validate publication source
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
   prepare:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -59,7 +64,7 @@ jobs:
             type=sha,prefix=sha-,suffix=-amd64-v3
   build:
     name: Build ${{ matrix.arch }}
-    needs: prepare
+    needs: [prepare, ci]
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +115,7 @@ jobs:
           overwrite: true
   build_v3:
     name: Build amd64-v3
-    needs: prepare
+    needs: [prepare, ci]
     if: inputs.publish_amd64_v3
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -153,9 +158,10 @@ jobs:
           retention-days: 1
           overwrite: true
   publish:
-    needs: [prepare, build, build_v3]
+    needs: [prepare, ci, build, build_v3]
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success'
+          && needs.ci.result == 'success'
           && needs.build.result == 'success'
           && (needs.build_v3.result == 'success'
               || (!inputs.publish_amd64_v3 && needs.build_v3.result == 'skipped')) }}
