@@ -35,6 +35,9 @@ same resolver snapshot to search and transport; a separate preflight followed by
 an unchecked std lookup would read a second, potentially changed configuration.
 The std resolver parser accepts `attempts:0`; reject it before DNS socket setup or
 retry-time division. Preserve hosts/localhost precedence over resolver settings.
+`receiveManyTimeout` may complete a ready operation after its deadline. Check the
+boot clock explicitly while draining DNS and clamp each attempt to the lookup's
+overall deadline; malformed/duplicate replies must not suppress retries or expiry.
 
 ## Integer and slice safety
 

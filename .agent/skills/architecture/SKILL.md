@@ -42,6 +42,8 @@ but does not connect. Preserve unicast/self-target checks after resolution.
 `startup_dns.zig` checks composed search names before copying or query encoding,
 using one resolver snapshot per lookup. Preserve hosts/localhost precedence and
 absolute names; skip invalid/overlong search candidates without querying them.
+Each queried name has an absolute DNS deadline; clamp retry deadlines to it and
+check time before every receive batch. Queued discarded replies cannot extend lookup.
 
 ## State transitions
 

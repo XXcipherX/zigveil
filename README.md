@@ -104,6 +104,9 @@ search candidates are skipped before DNS query construction; the original name
 is still tried. Each lookup uses one resolver configuration snapshot.
 `attempts:0` in `/etc/resolv.conf` fails DNS-dependent startup with
 `InvalidDnsAttempts`. Hosts-file and localhost matches do not need DNS settings.
+Each queried name has an absolute DNS deadline based on the resolver timeout.
+Retry deadlines stay within that limit; malformed packets and duplicate replies
+cannot extend it. Expiry fails with `NameServerFailure` before listening.
 
 ```sh
 # Default capacity needs at least 2060 fds; keep room for the service environment.

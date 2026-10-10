@@ -102,6 +102,10 @@ on amd64 x86_64_v3, matching the production image profiles.
 DNS regressions also cover oversized/invalid search candidates, valid search,
 absolute names and hosts precedence without a public resolver. Zero DNS attempts
 must fail startup/check before queries; hosts and localhost still bypass DNS.
+Startup/check deadlines are also tested with silence, continuous malformed packets
+and duplicate A replies while AAAA is missing. A deterministic unit fixture drives
+the production DNS loop with always-ready replies after timeout expiry, checking
+retry progress, the overall deadline and socket closure without scheduling races.
 
 ```sh
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil

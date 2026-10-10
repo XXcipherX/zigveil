@@ -28,6 +28,7 @@ Read the relevant project guides before changing behavior:
 8. Absolute hello/connect/prefix deadlines must survive activity and disabled idle.
 9. One loop owns all mutable dataplane state. No global state, locks or dataplane
    threads. Startup lookup workers must finish before any listener is bound.
+   DNS receive drains obey absolute retry/lookup deadlines even while data is ready.
 10. Keep docs/config/test expectations aligned with implemented behavior.
 11. Preserve exact Linux errno by value. Count fatal I/O once, with one actual
     socket side/operation and one cause; keep accept/connect/deadline errors separate.

@@ -18,7 +18,9 @@ from integration import Daemon, Origin, all_bytes, free_port, hello
 
 
 class NameServer:
-    def __init__(self):
+    def __init__(self, reply_mode="normal"):
+        self.reply_mode = reply_mode
+        self.flooding = threading.Event()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.address = f"127.200.{os.getpid() % 250}.{os.getpid() // 250 % 250 + 1}"
         self.socket.bind((self.address, 53))
@@ -50,6 +52,8 @@ class NameServer:
                     raise AssertionError("unexpected DNS query")
                 name = ".".join(labels).lower()
                 self.requests.append((name, kind))
+                if self.reply_mode == "silent" or (self.reply_mode == "duplicate_a" and kind == 28):
+                    continue
                 addresses = self.records.get(name)
                 answers = []
                 for text in addresses or ():
@@ -59,17 +63,29 @@ class NameServer:
                     answers.append(b"\xc0\x0c" + struct.pack("!HHIH", kind, 1, 60, len(addr.packed)) + addr.packed)
                 flags = 0x8183 if addresses is None else 0x8180
                 header = packet[:2] + struct.pack("!HHHHH", flags, 1, len(answers), 0, 0)
-                self.socket.sendto(header + packet[12:index + 4] + b"".join(answers), peer)
+                response = header + packet[12:index + 4] + b"".join(answers)
+                if self.reply_mode == "malformed":
+                    response = b"\x00"
+                self.socket.sendto(response, peer)
+                if self.reply_mode in ("malformed", "duplicate_a"):
+                    self.flooding.set()
+                    while not self.stopped.is_set():
+                        try:
+                            self.socket.sendto(response, peer)
+                        except ConnectionRefusedError:
+                            # The timed-out child has already closed its DNS port.
+                            return
             except Exception as exc:
-                self.errors.append(exc)
+                if not self.stopped.is_set():
+                    self.errors.append(exc)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_):
         self.stopped.set()
-        self.socket.close()
         self.thread.join(timeout=2)
+        self.socket.close()
         if self.thread.is_alive() or self.errors:
             raise AssertionError(self.errors or "DNS fixture failed to stop")
 
@@ -177,6 +193,27 @@ class DnsIntegration(unittest.TestCase):
                     with Daemon(f"{endpoint}:{origin.port}", launch_prefix=prefix) as proxy:
                         self.transfer(proxy)
             self.assertFalse(dns.requests)
+
+    def test_dns_deadline_survives_silence_and_continuous_discarded_replies(self):
+        for reply_mode in ("silent", "malformed", "duplicate_a"):
+            for flags in ([], ["--check"]):
+                with (self.subTest(reply_mode=reply_mode, flags=flags),
+                      NameServer(reply_mode) as dns, namespace(dns) as prefix,
+                      tempfile.TemporaryDirectory() as directory):
+                    name = "backend.example.test"
+                    dns.records[name] = ["127.0.0.1"]
+                    config = {"listen": f"0.0.0.0:{free_port()}",
+                              "routes": [{"sni": "example.com", "backend": f"{name}:443"}],
+                              "max_connections": 4, "max_handshakes": 2}
+                    path = Path(directory) / "config.json"
+                    path.write_text(json.dumps(config), encoding="utf-8")
+                    result = subprocess.run([*prefix, integration.BINARY, *flags, str(path)],
+                                            capture_output=True, timeout=5)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(b"NameServerFailure", result.stderr)
+                    self.assertNotIn(b"listening on", result.stderr)
+                    self.assertTrue(dns.requests)
+                    self.assertEqual(reply_mode != "silent", dns.flooding.is_set())
 
     def test_dns_failures_and_resolved_self_targets_rejected_before_bind(self):
         with NameServer() as dns, namespace(dns) as prefix, tempfile.TemporaryDirectory() as directory:

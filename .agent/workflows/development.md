@@ -46,6 +46,9 @@ on smaller runners; separate performance experiments may require more distinct C
 Logging changes verify live levels, SIGUSR1/USR2, idle suppression, grouped rate
 limits, bounded escaping/units and unchanged JSON counters through actual sockets.
 Keep daemon readiness independent of log verbosity.
+DNS changes preserve bounded startup/check completion with a silent resolver and
+continuous malformed or duplicate replies. Deterministic ready-I/O tests cover
+retry deadlines, the overall limit and socket cleanup without wall-clock timing.
 
 5. Review the full diff for unchecked arithmetic, stale slices, prefix offsets,
    backpressure masks, FIN ordering, fd/token reuse, deadline progress and teardown.

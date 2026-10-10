@@ -145,7 +145,10 @@ fn lookupDns(name: []const u8, io: Io, rc: *const HostName.ResolvConf, results: 
         .nanoseconds = (std.time.ns_per_s / rc.attempts) * @as(i96, rc.timeout_seconds),
     };
     send: while (now.nanoseconds < deadline.nanoseconds) : (now = clock.now(io)) {
-        const timeout: Io.Timeout = .{ .deadline = .{ .raw = now.addDuration(attempt_duration), .clock = clock } };
+        const attempt_deadline: Io.Timestamp = .{
+            .nanoseconds = @min(deadline.nanoseconds, now.addDuration(attempt_duration).nanoseconds),
+        };
+        const timeout: Io.Timeout = .{ .deadline = .{ .raw = attempt_deadline, .clock = clock } };
         const max_messages = queries.len * HostName.ResolvConf.max_nameservers;
         var outgoing: [max_messages]net.OutgoingMessage = undefined;
         var count: usize = 0;
@@ -162,7 +165,9 @@ fn lookupDns(name: []const u8, io: Io, rc: *const HostName.ResolvConf, results: 
             error.Timeout => continue :send,
             else => {},
         };
-        while (true) {
+        // A ready socket can complete a receive even with an expired I/O timeout.
+        // Bound the drain explicitly so discarded replies cannot postpone retries.
+        while (clock.now(io).nanoseconds < attempt_deadline.nanoseconds) {
             var incoming: [max_messages]net.IncomingMessage = @splat(.init);
             const recv_err, const received = socket.receiveManyTimeout(io, &incoming, &receive_storage, .{}, timeout);
             for (incoming[0..received]) |*message| {
@@ -240,4 +245,99 @@ test "search candidates stay inside DNS and storage limits" {
     try std.testing.expectEqual(@as(usize, 271), encoded.len);
     try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 1, 0, 0, 1 }, encoded[0..6]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1 }, encoded[encoded.len - 4 ..]);
+}
+
+test "ready discarded DNS replies cannot extend lookup or retry deadlines" {
+    const ReadyDns = struct {
+        const Self = @This();
+        const Reply = enum { wrong_id, duplicate_a };
+
+        reply: Reply,
+        time_ns: i96 = 0,
+        receives: usize = 0,
+        sends: usize = 0,
+        closed: usize = 0,
+        latest_timeout_ns: i96 = 0,
+
+        const vtable: Io.VTable = table: {
+            var value = Io.failing.vtable.*;
+            value.now = now;
+            value.netBindIp = bind;
+            value.netClose = close;
+            value.batchAwaitConcurrent = awaitBatch;
+            break :table value;
+        };
+
+        fn context(userdata: ?*anyopaque) *Self {
+            return @ptrCast(@alignCast(userdata.?));
+        }
+
+        fn now(userdata: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+            return .{ .nanoseconds = context(userdata).time_ns };
+        }
+
+        fn bind(_: ?*anyopaque, address: *const net.IpAddress, _: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket {
+            return .{ .handle = 123, .address = address.* };
+        }
+
+        fn close(userdata: ?*anyopaque, sockets: []const net.Socket) void {
+            context(userdata).closed += sockets.len;
+        }
+
+        fn awaitBatch(userdata: ?*anyopaque, batch: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
+            const self = context(userdata);
+            self.latest_timeout_ns = @max(self.latest_timeout_ns, timeout.deadline.raw.nanoseconds);
+            const index = batch.submitted.head;
+            const storage = &batch.storage[index.toIndex()];
+            const result: Io.Operation.Result = switch (storage.submission.operation) {
+                .net_send => |send| sent: {
+                    self.sends += 1;
+                    break :sent .{ .net_send = .{ null, send.messages.len } };
+                },
+                .net_receive => |receive| received: {
+                    // Never return Timeout: model queued data even after expiry.
+                    // This cap makes a missing deadline fail without hanging CI.
+                    if (self.receives == 16) return error.Canceled;
+                    self.receives += 1;
+                    self.time_ns += 600 * std.time.ns_per_ms;
+                    const data = receive.data_buffer[0..12];
+                    @memset(data, 0);
+                    data[2] = 0x80;
+                    // Io.failing supplies zero random bytes, so the A ID is zero.
+                    if (self.reply == .wrong_id) @memset(data[0..2], 0xff);
+                    receive.message_buffer[0].from = .{ .ip4 = .loopback(53) };
+                    receive.message_buffer[0].data = data;
+                    break :received .{ .net_receive = .{ null, 1 } };
+                },
+                else => unreachable,
+            };
+            storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+            batch.submitted = .empty;
+            batch.completed = .{ .head = index, .tail = index };
+        }
+    };
+
+    for ([_]ReadyDns.Reply{ .wrong_id, .duplicate_a }) |reply| {
+        for ([_]u32{ 1, 2 }) |attempts| {
+            var fake: ReadyDns = .{ .reply = reply };
+            const io: Io = .{ .userdata = &fake, .vtable = &ReadyDns.vtable };
+            var rc: HostName.ResolvConf = .{
+                .attempts = attempts,
+                .ndots = 1,
+                .timeout_seconds = 1,
+                .nameservers_buffer = undefined,
+                .nameservers_len = 1,
+                .search_buffer = undefined,
+                .search_len = 0,
+            };
+            rc.nameservers_buffer[0] = .{ .ip4 = .loopback(53) };
+            var result_storage: [1]HostName.LookupResult = undefined;
+            var results: Results = .init(&result_storage);
+            try std.testing.expectError(error.NameServerFailure, lookupDns("backend.example.test", io, &rc, &results, 443));
+            try std.testing.expectEqual(@as(usize, 2), fake.receives);
+            try std.testing.expectEqual(@as(usize, attempts), fake.sends);
+            try std.testing.expectEqual(@as(i96, std.time.ns_per_s), fake.latest_timeout_ns);
+            try std.testing.expectEqual(@as(usize, 1), fake.closed);
+        }
+    }
 }

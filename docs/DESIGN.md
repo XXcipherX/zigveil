@@ -129,6 +129,11 @@ Invalid or overlong composed names are skipped before copying/query encoding;
 valid search/ndots behavior and the final bare-name lookup are preserved.
 Reject zero DNS attempts before transport setup or retry-time division; this is a
 normal startup error, including `--check`. Hosts/localhost resolution bypasses it.
+Each queried name has a boot-clock deadline from the resolver timeout setting.
+Clamp each retry deadline to that overall deadline and check the clock before
+every receive batch: ready datagrams can complete an I/O operation even after its
+timeout expires. Discarded packets, duplicate answers and immediate receive errors
+must not keep a retry alive indefinitely. Exhaustion returns `NameServerFailure`.
 Each configured hostname resolves once before bind, including `--check`. Lookup
 errors prevent startup. The first IPv4 answer is selected, otherwise the first IPv6;
 mapped IPv4 counts as IPv4. The selected address is checked for unicast and self
