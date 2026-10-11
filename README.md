@@ -223,13 +223,17 @@ For local image builds use `docker build -t zigveil .`; select safety checks wit
 The runtime contains the daemon and a small entrypoint, without a compiler.
 `--check`, `--help` and `--version` pass through without creating a config.
 
-Publish with **Actions → Publish Docker image → Run workflow**. The workflow
-first runs the complete Linux CI workflow from the same commit. Only its success
-allows registry builds/uploads. It builds on native Ubuntu 26.04 amd64/arm64 runners,
-pushes by digest, verifies each
-image, then checks runnable platforms before applying tags. Published tags include
-the selected tag, optional `latest`, and `sha-<commit>`. An optional amd64 image
-uses the `x86_64_v3` CPU profile and receives the corresponding `-amd64-v3` tags.
+Before publishing, check that **Linux CI** succeeded for the source commit. Publish
+with **Actions → Publish Docker image → Run workflow**. Linux CI runs separately;
+publication neither repeats its test matrix nor queries or waits for its result.
+
+It builds on native Ubuntu 26.04 amd64/arm64 runners, importing matching Docker
+caches from CI and previous publications for the selected CPU profile and fast/safe
+mode. Cache availability depends on GitHub's branch access rules. Each image is
+pushed by digest and smoke-tested; runnable platforms are checked before applying
+tags. Published tags include the selected tag, optional `latest`, and
+`sha-<commit>`. An optional amd64 image uses the `x86_64_v3` CPU profile and receives
+the corresponding `-amd64-v3` tags.
 Generic images use baseline CPUs. Publishing runs are serialized.
 
 ## Docker Compose installer

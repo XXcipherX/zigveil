@@ -27,11 +27,6 @@ concurrency:
   group: docker-image
   cancel-in-progress: false
 jobs:
-  ci:
-    name: Validate publication source
-    uses: ./.github/workflows/ci.yml
-    permissions:
-      contents: read
   prepare:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -64,7 +59,7 @@ jobs:
             type=sha,prefix=sha-,suffix=-amd64-v3
   build:
     name: Build ${{ matrix.arch }}
-    needs: [prepare, ci]
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -90,11 +85,15 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          build-args: PRODUCTION_MODE=${{ inputs.production_mode }}
+          build-args: |
+            PRODUCTION_MODE=${{ inputs.production_mode }}
+            ZIGVEIL_CPU=baseline
           outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ needs.prepare.outputs.labels }}
-          cache-from: type=gha,scope=publish-${{ matrix.arch }}
-          cache-to: type=gha,scope=publish-${{ matrix.arch }},mode=max
+          cache-from: |
+            type=gha,scope=ci-docker-${{ matrix.arch }}-${{ inputs.production_mode }}
+            type=gha,scope=publish-${{ matrix.arch }}-${{ inputs.production_mode }}
+          cache-to: type=gha,scope=publish-${{ matrix.arch }}-${{ inputs.production_mode }},mode=max
       - name: Verify image and export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -115,7 +114,7 @@ jobs:
           overwrite: true
   build_v3:
     name: Build amd64-v3
-    needs: [prepare, ci]
+    needs: prepare
     if: inputs.publish_amd64_v3
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -137,8 +136,10 @@ jobs:
             ZIGVEIL_CPU=x86_64_v3
           outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ needs.prepare.outputs.v3_labels }}
-          cache-from: type=gha,scope=publish-amd64-v3
-          cache-to: type=gha,scope=publish-amd64-v3,mode=max
+          cache-from: |
+            type=gha,scope=ci-docker-amd64-v3-${{ inputs.production_mode }}
+            type=gha,scope=publish-amd64-v3-${{ inputs.production_mode }}
+          cache-to: type=gha,scope=publish-amd64-v3-${{ inputs.production_mode }},mode=max
       - name: Verify image and export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -158,10 +159,9 @@ jobs:
           retention-days: 1
           overwrite: true
   publish:
-    needs: [prepare, ci, build, build_v3]
+    needs: [prepare, build, build_v3]
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success'
-          && needs.ci.result == 'success'
           && needs.build.result == 'success'
           && (needs.build_v3.result == 'success'
               || (!inputs.publish_amd64_v3 && needs.build_v3.result == 'skipped')) }}

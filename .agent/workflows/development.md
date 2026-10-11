@@ -38,8 +38,11 @@ Full Linux validation explicitly selects amd64/arm64 baseline and amd64
 x86_64_v3, matching production image profiles. Pass the matrix CPU to every build,
 test, fuzz and optional benchmark-tool build. The default ordinary build is baseline.
 Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
-Linux CI is reusable by publication and checks that publication's exact commit
-before registry builds/uploads. Keep standalone and caller CI concurrency separate.
+Manual publication builds directly, while the operator checks that ordinary Linux
+CI succeeded for the source commit. Do not repeat the matrix or add run-status
+queries/waits to publication. Keep Docker cache scopes aligned by architecture,
+CPU profile and fast/safe mode; published digests still need smoke and platform
+checks.
 Mandatory shared-splice workloads use --require-workloads, so topology refusal
 cannot pass CI. Use one generator there to keep correctness coverage executable
 on smaller runners; separate performance experiments may require more distinct CPUs.

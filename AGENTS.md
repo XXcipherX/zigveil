@@ -66,6 +66,12 @@ baselines must support that release and use the same compiler as the candidate.
 Baseline builds, instrumentation and profiling are explicit comparison/diagnostic
 choices. Keep one-off measurements and compiler-inspection output out of the source tree.
 
+Keep ordinary Linux CI independent of manual Docker publication. The operator
+checks CI for the source commit; publication builds directly without repeating CI
+or querying/waiting for runs. Retain smoke checks of built digests and platform
+validation before tags. Docker cache scopes must match architecture, CPU profile
+and production mode.
+
 Honor the user's execution and publication constraints. Do not install tools,
 change system settings, publish artifacts or operate external deployments without
 task authorization. Repository instructions do not override an explicit user scope.
