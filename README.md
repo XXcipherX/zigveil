@@ -296,12 +296,13 @@ only for queued bytes. A full destination ring suspends the corresponding source
 read interest, letting TCP apply backpressure. Empty rings reset their head so the
 next read can use one contiguous span.
 
-After an opaque read of at least 16 KiB, the relay can use nonblocking `splice` through two
-pipes shared by the serving process. Each callback returns the pipes empty:
+After an opaque read of at least 16 KiB, that direction can use nonblocking
+`splice` through two pipes shared by the serving process. Each callback returns the pipes empty:
 blocked or partial output is saved in that connection's bounded ring. The
 original prefix stays ordered, and connections never share pending bytes.
-After 32 consecutive splice reads smaller than 1 KiB, drained connections return
-to buffered forwarding; a later large read can qualify again. Pipe allocation failure
+Each direction selects its mode independently. After 32 consecutive splice reads
+smaller than 1 KiB, that drained direction returns to buffered forwarding; a later
+large read can qualify again. Pipe allocation failure
 also keeps the buffered path usable. Build with `-Drelay_splice=false` to disable
 this path for a controlled comparison.
 

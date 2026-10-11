@@ -46,6 +46,10 @@ checks.
 Mandatory shared-splice workloads use --require-workloads, so topology refusal
 cannot pass CI. Use one generator there to keep correctness coverage executable
 on smaller runners; separate performance experiments may require more distinct CPUs.
+Adaptive relay changes cover asymmetric bulk/short traffic in both orientations,
+independent activation/deactivation/reactivation, simultaneous bulk, partial I/O,
+pipe reclamation and both FIN halves. Preserve memory layout and compile-out in
+buffered builds; operation-count regressions do not establish measured speedups.
 Logging changes verify live levels, SIGUSR1/USR2, cumulative traffic, actual elapsed
 rate windows, idle suppression with active connections, fixed failure batches and
 their last-event context, bounded escaping/units and unchanged JSON counters.

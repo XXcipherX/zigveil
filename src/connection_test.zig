@@ -52,6 +52,7 @@ const Fake = struct {
     max_splice_read: usize = 32,
     pipe_capacity: usize = 32,
     splice_reads: usize = 0,
+    splice_reads_by_direction: [2]usize = .{ 0, 0 },
     shared_open: bool = false,
     pipe_attempted: bool = false,
     reclaim_error: ?outcome.Errno = null,
@@ -143,6 +144,7 @@ const Fake = struct {
 
     pub fn spliceRead(self: *Fake, source: i32, fd: i32, bytes: usize) outcome.Result(usize) {
         self.splice_reads += 1;
+        self.splice_reads_by_direction[@intFromBool(source == 2)] += 1;
         std.debug.assert(fd == 11 or fd == 13);
         const pipe = &self.pipes[if (fd == 11) @as(usize, 0) else 1];
         if (self.pipe_read_blocked or (self.pipe_page_full and pipe.len != 0)) return .{ .err = .AGAIN };
@@ -335,12 +337,12 @@ test "tiny reads never accumulate into splice eligibility; a large opaque read q
     rig.io.client.max_read = 64;
     rig.drive(&config, 12);
     try std.testing.expectEqual(payload.len, rig.io.backend.length);
-    try std.testing.expect(!rig.conn.splice_eligible);
+    try std.testing.expect(!rig.conn.to_backend.splice_eligible);
     try std.testing.expectEqual(@as(usize, 0), rig.io.open_attempts);
     rig.io.client.offset = 0;
     rig.io.client.max_read = 16384;
     rig.drive(&config, 1);
-    try std.testing.expect(rig.conn.splice_eligible);
+    try std.testing.expect(rig.conn.to_backend.splice_eligible);
     try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
     rig.drive(&config, 1);
     try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
@@ -352,7 +354,8 @@ test "shared pipes spill before yielding and never mix two connections" {
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.use_pipes = true;
     const first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     rig.io.client.input = first;
@@ -370,7 +373,8 @@ test "shared pipes spill before yielding and never mix two connections" {
     second.stage = null;
     second.backend = 2;
     second.state = .relaying;
-    second.splice_eligible = true;
+    second.to_backend.splice_eligible = true;
+    second.to_client.splice_eligible = true;
     rig.io.backend.blocked = false;
     rig.io.client.input = "another connection";
     rig.io.client.offset = 0;
@@ -407,7 +411,8 @@ test "shared pipe reset discards pending data; reclamation failure disables the 
         const reclaim_failure = fault == 2;
         var rig: Rig = .{};
         rig.relay();
-        rig.conn.splice_eligible = true;
+        rig.conn.to_backend.splice_eligible = true;
+        rig.conn.to_client.splice_eligible = true;
         rig.io.use_pipes = true;
         rig.io.client.input = "pending bytes";
         if (reclaim_failure) {
@@ -429,16 +434,16 @@ test "short-message phase returns to buffering and a later large read restores s
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
     rig.io.use_pipes = true;
     const tiny_phase: [2240]u8 = @splat(0x31);
     rig.io.pipe_capacity = 65536;
     rig.io.client.input = &tiny_phase;
     rig.drive(&config, 1);
-    try std.testing.expectEqual(@as(u8, 32), rig.conn.short_reads);
+    try std.testing.expectEqual(@as(u8, 32), rig.conn.to_backend.short_reads);
     const splice_reads = rig.io.splice_reads;
     rig.drive(&config, 2);
-    try std.testing.expect(!rig.conn.splice_eligible);
+    try std.testing.expect(!rig.conn.to_backend.splice_eligible);
     try std.testing.expectEqual(splice_reads, rig.io.splice_reads);
     try std.testing.expectEqualSlices(u8, &tiny_phase, rig.io.backend.output[0..rig.io.backend.length]);
     try std.testing.expectEqual(@as(usize, 0), rig.io.pipe_fds_closed);
@@ -451,10 +456,172 @@ test "short-message phase returns to buffering and a later large read restores s
     rig.io.client.max_read = 16384;
     rig.io.max_splice_read = 65536;
     rig.drive(&config, 8);
-    try std.testing.expect(rig.conn.splice_eligible);
+    try std.testing.expect(rig.conn.to_backend.splice_eligible);
     try std.testing.expect(rig.io.splice_reads > splice_reads);
     try std.testing.expectEqualSlices(u8, &bulk_phase, rig.io.backend.output[0..rig.io.backend.length]);
     try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
+}
+
+test "direction adaptive metadata fits the existing padded layout" {
+    const PreviousDirection = struct {
+        buffer: @import("buffer.zig").Buffer,
+        eof: bool = false,
+        fin: bool = false,
+        pipe: if (relay_pipe.enabled) ?relay_pipe.Borrowed else void = if (relay_pipe.enabled) null else {},
+    };
+    try std.testing.expectEqual(@sizeOf(PreviousDirection), @sizeOf(engine.Direction));
+    try std.testing.expectEqual(@alignOf(PreviousDirection), @alignOf(engine.Direction));
+}
+
+test "bulk and short-message directions activate and deactivate independently" {
+    if (!relay_pipe.enabled) return error.SkipZigTest;
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    for ([_]bool{ false, true }) |reverse| {
+        var rig: Rig = .{};
+        rig.relay();
+        var forward: [65536]u8 = undefined;
+        var backward: [65536]u8 = undefined;
+        rig.conn.to_backend.buffer = .{ .data = &forward };
+        rig.conn.to_client.buffer = .{ .data = &backward };
+        rig.io.use_pipes = true;
+        rig.io.pipe_capacity = 65536;
+        rig.io.max_splice_read = 65536;
+        const bulk_direction = if (reverse) &rig.conn.to_client else &rig.conn.to_backend;
+        const short_direction = if (reverse) &rig.conn.to_backend else &rig.conn.to_client;
+        const bulk_source = if (reverse) &rig.io.backend else &rig.io.client;
+        const short_source = if (reverse) &rig.io.client else &rig.io.backend;
+        const bulk_target = if (reverse) &rig.io.client else &rig.io.backend;
+        const short_target = if (reverse) &rig.io.backend else &rig.io.client;
+        const bulk_index = @intFromBool(reverse);
+        const short_index = 1 - bulk_index;
+        const bulk: [32768]u8 = @splat(0x9b);
+        const tiny: [2240]u8 = @splat(0x31);
+        bulk_source.input = &bulk;
+        bulk_source.max_read = 16384;
+        short_source.input = "ack";
+        rig.drive(&config, 2);
+        try std.testing.expect(bulk_direction.splice_eligible);
+        try std.testing.expect(!short_direction.splice_eligible);
+        try std.testing.expect(rig.io.splice_reads_by_direction[bulk_index] > 0);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.splice_reads_by_direction[short_index]);
+        try std.testing.expectEqualSlices(u8, &bulk, bulk_target.output[0..bulk_target.length]);
+        try std.testing.expectEqualStrings("ack", short_target.output[0..short_target.length]);
+
+        // Qualify the other direction through actual large opaque reads.
+        short_source.input = &bulk;
+        short_source.offset = 0;
+        short_source.max_read = 16384;
+        short_target.length = 0;
+        rig.drive(&config, 1);
+        try std.testing.expect(short_direction.splice_eligible);
+        try std.testing.expectEqualSlices(u8, &bulk, short_target.output[0..short_target.length]);
+
+        // Bulk reads must neither reset the opposite short counter nor lose
+        // their own eligibility when that short-message phase deactivates.
+        short_source.input = &tiny;
+        short_source.offset = 0;
+        short_source.max_read = 64;
+        short_target.length = 0;
+        bulk_source.offset = 0;
+        bulk_target.length = 0;
+        rig.drive(&config, 1);
+        try std.testing.expectEqual(@as(u8, 32), short_direction.short_reads);
+        try std.testing.expectEqual(@as(u8, 0), bulk_direction.short_reads);
+        const short_calls = rig.io.splice_reads_by_direction[short_index];
+        const bulk_calls = rig.io.splice_reads_by_direction[bulk_index];
+        rig.drive(&config, 1);
+        try std.testing.expect(!short_direction.splice_eligible);
+        try std.testing.expect(bulk_direction.splice_eligible);
+        try std.testing.expectEqual(short_calls, rig.io.splice_reads_by_direction[short_index]);
+        try std.testing.expect(rig.io.splice_reads_by_direction[bulk_index] > bulk_calls);
+        try std.testing.expectEqualSlices(u8, &tiny, short_target.output[0..short_target.length]);
+        try std.testing.expectEqualSlices(u8, &bulk, bulk_target.output[0..bulk_target.length]);
+        bulk_source.eof = true;
+        short_source.eof = true;
+        rig.drive(&config, 2);
+        try std.testing.expectEqual(engine.State.closed, rig.conn.state);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.client.fins);
+        try std.testing.expectEqual(@as(usize, 1), rig.io.backend.fins);
+        try std.testing.expectEqual(@as(u64, 0), rig.counts.io_errors);
+        try std.testing.expectEqual(@as(u64, 2 * bulk.len), if (reverse) rig.counts.bytes_backend_to_client else rig.counts.bytes_client_to_backend);
+        try std.testing.expectEqual(@as(u64, 3 + bulk.len + tiny.len), if (reverse) rig.counts.bytes_client_to_backend else rig.counts.bytes_backend_to_client);
+        rig.conn.assertPipesReturned();
+        try std.testing.expectEqual(@as(usize, 0), rig.io.pipes[0].len);
+        try std.testing.expectEqual(@as(usize, 0), rig.io.pipes[1].len);
+        rig.io.disableSharedPipes();
+        rig.io.disableSharedPipes();
+        try std.testing.expectEqual(@as(usize, 4), rig.io.pipe_fds_closed);
+    }
+}
+
+test "simultaneous bulk preserves both queues and FINs under partial writes" {
+    if (!relay_pipe.enabled) return error.SkipZigTest;
+    var config = try testConfig();
+    defer config.deinit(std.testing.allocator);
+    var rig: Rig = .{};
+    rig.relay();
+    var forward: [65536]u8 = undefined;
+    var backward: [65536]u8 = undefined;
+    rig.conn.to_backend.buffer = .{ .data = &forward };
+    rig.conn.to_client.buffer = .{ .data = &backward };
+    rig.io.use_pipes = true;
+    rig.io.pipe_capacity = 65536;
+    rig.io.max_splice_read = 65536;
+    const warmup: [16384]u8 = @splat(0x17);
+    rig.io.client.input = &warmup;
+    rig.io.backend.input = &warmup;
+    rig.drive(&config, 1);
+    try std.testing.expect(rig.conn.to_backend.splice_eligible and rig.conn.to_client.splice_eligible);
+    try std.testing.expectEqualSlices(u8, &warmup, rig.io.backend.output[0..rig.io.backend.length]);
+    try std.testing.expectEqualSlices(u8, &warmup, rig.io.client.output[0..rig.io.client.length]);
+    const warmed_calls = rig.io.splice_reads_by_direction;
+    rig.io.client.offset = 0;
+    rig.io.backend.offset = 0;
+    rig.io.client.length = 0;
+    rig.io.backend.length = 0;
+    const up: [131072]u8 = @splat(0x3a);
+    const down: [131072]u8 = @splat(0xb4);
+    rig.io.client.input = &up;
+    rig.io.backend.input = &down;
+    rig.io.client.max_read = 16384;
+    rig.io.backend.max_read = 16384;
+    rig.io.client.eof = true;
+    rig.io.backend.eof = true;
+    rig.io.client.blocked = true;
+    rig.io.backend.blocked = true;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 65536), rig.conn.to_backend.buffer.len);
+    try std.testing.expectEqual(@as(usize, 65536), rig.conn.to_client.buffer.len);
+    try std.testing.expect(rig.io.splice_reads_by_direction[0] > warmed_calls[0] and rig.io.splice_reads_by_direction[1] > warmed_calls[1]);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.client.fins);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.backend.fins);
+    rig.io.client.blocked = false;
+    rig.io.backend.blocked = false;
+    // Drain each spilled ring before allowing more source data. Partial writes
+    // plus buffered reads would otherwise refill it until EOF without reborrowing.
+    rig.io.pipe_read_blocked = true;
+    rig.drive(&config, 1);
+    try std.testing.expectEqual(@as(usize, 0), rig.conn.to_backend.buffer.len);
+    try std.testing.expectEqual(@as(usize, 0), rig.conn.to_client.buffer.len);
+    rig.io.pipe_read_blocked = false;
+    rig.io.client.max_write = 8191;
+    rig.io.backend.max_write = 8191;
+    rig.drive(&config, 4);
+    try std.testing.expect(rig.conn.to_backend.splice_eligible and rig.conn.to_client.splice_eligible);
+    try std.testing.expect(rig.io.splice_reads_by_direction[0] > 0 and rig.io.splice_reads_by_direction[1] > 0);
+    try std.testing.expectEqualSlices(u8, &up, rig.io.backend.output[0..rig.io.backend.length]);
+    try std.testing.expectEqualSlices(u8, &down, rig.io.client.output[0..rig.io.client.length]);
+    try std.testing.expectEqual(engine.State.closed, rig.conn.state);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.client.fins);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.backend.fins);
+    try std.testing.expectEqual(@as(u64, 0), rig.counts.io_errors);
+    try std.testing.expectEqual(@as(u64, warmup.len + up.len), rig.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(u64, warmup.len + down.len), rig.counts.bytes_backend_to_client);
+    try std.testing.expectEqual(@as(usize, 1), rig.io.open_attempts);
+    rig.conn.assertPipesReturned();
+    try std.testing.expectEqual(@as(usize, 0), rig.io.pipes[0].len);
+    try std.testing.expectEqual(@as(usize, 0), rig.io.pipes[1].len);
 }
 
 test "shared source EAGAIN and page-slot pressure retain independent FIN halves" {
@@ -463,7 +630,8 @@ test "shared source EAGAIN and page-slot pressure retain independent FIN halves"
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.use_pipes = true;
     rig.io.pipe_read_blocked = true;
     rig.io.backend.input = "reply before FIN";
@@ -499,7 +667,8 @@ test "spilled ring debt drains before splice resumes in the same callback" {
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.use_pipes = true;
     rig.io.client.input = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     rig.io.client.eof = true;
@@ -522,7 +691,8 @@ test "uneven large splice reads stop at the byte quantum without forcing a copie
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.use_pipes = true;
     rig.io.pipe_capacity = 65536;
     rig.io.max_splice_read = 65536;
@@ -553,7 +723,8 @@ test "pipe allocation fallback is once per serving owner; prefix debt cannot be 
     defer config.deinit(std.testing.allocator);
     var rig: Rig = .{};
     rig.init(.{});
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.use_pipes = true;
     rig.io.backend.blocked = true;
     rig.drive(&config, 1);
@@ -568,7 +739,8 @@ test "pipe allocation fallback is once per serving owner; prefix debt cannot be 
     rig.conn.assertPipesReturned();
     rig.io.disableSharedPipes();
     rig.relay();
-    rig.conn.splice_eligible = true;
+    rig.conn.to_backend.splice_eligible = true;
+    rig.conn.to_client.splice_eligible = true;
     rig.io.client.offset = 0;
     rig.io.client.input = "fallback still forwards";
     rig.io.backend.length = 0;
@@ -584,7 +756,8 @@ test "shared spilled FIN waits for debt and NOTCONN probes the actual destinatio
     for ([_]bool{ false, true }) |reverse| for ([_]bool{ false, true }) |reset| {
         var rig: Rig = .{};
         rig.relay();
-        rig.conn.splice_eligible = true;
+        rig.conn.to_backend.splice_eligible = true;
+        rig.conn.to_client.splice_eligible = true;
         rig.io.use_pipes = true;
         const source = if (reverse) &rig.io.backend else &rig.io.client;
         const target = if (reverse) &rig.io.client else &rig.io.backend;

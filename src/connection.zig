@@ -24,6 +24,8 @@ pub const Direction = struct {
     eof: bool = false,
     fin: bool = false,
     pipe: if (relay_pipe.enabled) ?relay_pipe.Borrowed else void = if (relay_pipe.enabled) null else {},
+    splice_eligible: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
+    short_reads: if (relay_pipe.enabled) u8 else void = if (relay_pipe.enabled) 0 else {},
 
     fn queued(self: *const Direction) usize {
         if (relay_pipe.enabled) if (self.pipe) |pipe| return pipe.pending;
@@ -59,9 +61,7 @@ pub const Connection = struct {
     to_client: Direction,
     entered_ms: u64,
     activity_ms: u64,
-    splice_eligible: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
     pipe_failed: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
-    short_reads: if (relay_pipe.enabled) u8 else void = if (relay_pipe.enabled) 0 else {},
 
     pub fn init(client: i32, stage: []u8, forward: []u8, reverse: []u8, now: u64) Connection {
         return .{
@@ -154,15 +154,6 @@ pub const Connection = struct {
             self.activity_ms = now;
         }
         if (self.state != .relaying) return;
-        if (relay_pipe.enabled and self.short_reads == short_read_limit and
-            self.to_backend.queued() == 0 and self.to_client.queued() == 0)
-        {
-            // A bulk stream can turn into short request/reply traffic. Queued
-            // debt still precedes this transition; pipes are already returned.
-            self.splice_eligible = false;
-            self.short_reads = 0;
-            io.metrics.add("pipe_deactivations", 1);
-        }
         if (!self.pump(io, &self.to_backend, self.client, self.backend, true, now, counts) or self.state == .closed) return;
         if (!self.pump(io, &self.to_client, self.backend, self.client, false, now, counts) or self.state == .closed) return;
         if (self.to_backend.fin and self.to_client.fin) self.close(.complete);
@@ -293,6 +284,12 @@ pub const Connection = struct {
         // empty on every path, including blocked writes, fairness and resets.
         defer if (relay_pipe.enabled) self.reclaimPipe(io, direction, forward, counts);
         if (forward) io.metrics.add("pump_forward", 1) else io.metrics.add("pump_reverse", 1);
+        if (relay_pipe.enabled and direction.short_reads == short_read_limit and direction.queued() == 0) {
+            // Only this direction's drained short-message phase changes its mode.
+            direction.splice_eligible = false;
+            direction.short_reads = 0;
+            io.metrics.add("pipe_deactivations", 1);
+        }
         var calls: usize = 0;
         var sent: usize = 0;
         var read_blocked = false;
@@ -367,7 +364,7 @@ pub const Connection = struct {
                 // in the same callback. Variable read sizes and fairness must
                 // not strand a bulk stream on the copying path after one spill.
                 if (relay_pipe.enabled and self.stage == null and direction.pipe == null and direction.buffer.len == 0 and
-                    self.splice_eligible and !self.pipe_failed)
+                    direction.splice_eligible and !self.pipe_failed)
                 {
                     if (io.openRelayPipes(direction.buffer.data.len)) |pipes|
                         direction.pipe = .{ .handle = pipes[if (forward) @as(usize, 0) else 1] }
@@ -405,13 +402,13 @@ pub const Connection = struct {
                     } else if (relay_pipe.enabled and direction.pipe != null) {
                         std.debug.assert(n <= direction.pipe.?.handle.capacity - direction.pipe.?.pending);
                         direction.pipe.?.pending += n;
-                        self.short_reads = if (n < short_read_bytes) @min(self.short_reads + 1, short_read_limit) else 0;
+                        direction.short_reads = if (n < short_read_bytes) @min(direction.short_reads + 1, short_read_limit) else 0;
                         self.activity_ms = now;
                     } else {
                         // A long sequence of tiny messages is still a small-I/O
                         // workload. Enter the pipe path only after a large
                         // opaque read, never because the ClientHello was large.
-                        if (relay_pipe.enabled and n >= bulk_read_bytes) self.splice_eligible = true;
+                        if (relay_pipe.enabled and n >= bulk_read_bytes) direction.splice_eligible = true;
                         if (metrics.enabled and (direction.buffer.head + direction.buffer.len) % direction.buffer.data.len + n == direction.buffer.data.len)
                             io.metrics.add("ring_wrap", 1);
                         direction.buffer.produced(n);

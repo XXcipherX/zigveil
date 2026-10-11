@@ -76,6 +76,9 @@ Four additional idle fds may belong to the process's shared relay pipes after
 bulk traffic. They must stay constant across connection churn; no connection may
 retain bytes in them after its callback. Instrumented SIGUSR1 snapshots distinguish
 splice traffic, ring spills, activation/fallback and the shared pipe capacity.
+pipe_deactivations counts each direction returning to buffered mode; it does not
+mean the shared pair was closed. Eligibility and short-read counts are independent
+for client-to-backend and backend-to-client traffic.
 Read/write dimensions cover both buffered socket operations and splice. Reclaim
 failures count on that direction's source and disable the shared pipes; allocation
 failure uses the buffered fallback and is visible in optional dataplane counters.

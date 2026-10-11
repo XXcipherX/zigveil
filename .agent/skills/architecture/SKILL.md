@@ -79,6 +79,12 @@ Never carry another connection's bytes in a shared pipe across callbacks. Shared
 pipes close once with Io, never with a slot. `relay_pipe.Pipe` is the owned handle;
 `Borrowed` carries only a pump's handle copy and debt. `assertPipesReturned` checks
 null borrows at teardown; it must not become a late drain or resource-release path.
+Adaptive eligibility and consecutive short-read counts belong to Direction.
+Check deactivation at pump entry only against that direction's debt. Keep the
+16 KiB activation, 1 KiB short-read and 32-read thresholds, process-owned pair and
+connection-wide allocation-failure fallback. Opposite traffic must not activate,
+reset or deactivate its peer's adaptive state. The fields fit existing Direction
+padding in supported CI builds; verify both splice-enabled and buffered layouts.
 Short-message fallback, prefix order,
 FIN-after-drain and typed socket failures remain the production state machine.
 

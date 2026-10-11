@@ -39,6 +39,8 @@ Read the relevant project guides before changing behavior:
     and the complete unchanged JSON counter schema.
 13. Io owns two shared pipes, never a slot. A pump returns its borrow empty on
     every exit; deferred live bytes belong to that connection's fixed ring.
+    Adaptive eligibility/short-read counts belong to each Direction; opposite
+    traffic must not select its mode or gate its drained deactivation.
 14. Dataplane diagnostics remain compile-time optional with zero production
     storage/work. Validate structural dataplane changes against an explicit
     production baseline using ordinary fast and paired measurements on the same runner.

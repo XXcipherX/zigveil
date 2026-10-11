@@ -19,6 +19,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Accept errors | Production raw-result decoder: interrupted, empty, per-connection, resource-pressure and fatal outcomes |
 | Preservation | Hello plus coalesced tail, maximum prefix sent through small relay rings |
 | Partial I/O and pressure | Short sends in both directions, full ring suppressing source reads, resume |
+| Adaptive direction selection | Bulk/short traffic in both orientations, independent activation and deactivation, later bulk reactivation, simultaneous bulk with EAGAIN/partial sends, exact bytes/FINs and unchanged Direction layout with splice enabled or disabled |
 | EOF and FIN | Both half-close orders, drain before FIN/ENOTCONN, opposite buffered data, no repeated shutdown |
 | Failures | Connect/read/write failures, fatal shutdown and ENOTCONN with pending reset on both peers |
 | Error dimensions | Exact errno through production read/write/shutdown/SO_ERROR paths; both socket roles, unknown errno, zero writes, aggregate consistency and no double count |

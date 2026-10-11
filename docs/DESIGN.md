@@ -256,7 +256,7 @@ Only both completed halves or a fatal event end the connection.
 
 ## Shared splice relay
 
-An opaque buffered read of at least 16 KiB makes a stream eligible for splice;
+An opaque buffered read of at least 16 KiB makes that direction eligible for splice;
 prefix size and accumulated tiny messages do not. Activation waits for the prefix
 and that direction's ring debt to drain. Splice can resume in the same callback
 after draining a previous ring spill. Reads respect the remaining byte quantum
@@ -273,8 +273,19 @@ discarded. This bounded spill can require additional pipe reads at callback exit
 An unexpected reclamation failure disables the process's pipe path and closes
 the affected connection. Ring data always precedes subsequent source data and FIN.
 
-After 32 consecutive splice reads below 1 KiB, an empty stream returns to buffered
-forwarding; a later large opaque read can requalify it. The shared pipes remain
+Eligibility and consecutive short-read counts belong to Direction. After 32
+consecutive splice reads below 1 KiB, that direction returns to buffered forwarding
+once its own debt is empty; a later large opaque read can requalify it. Opposite
+bulk reads cannot reset its counter, activate it or disable its bulk mode. This
+avoids forcing short-message traffic through splice solely because the other
+direction is bulk, and removes the other ring's emptiness from deactivation.
+The thresholds and per-direction work budgets stay unchanged. Two adaptive fields
+fit the existing Direction padding on supported CI targets; the corresponding
+connection-wide fields are removed. One mode check runs at each pump entry,
+replacing the connection-wide check. No new allocation, pipe, queue or syscall is
+added by selection itself; actual CPU/throughput effects depend on traffic.
+Pipe allocation failure remains connection-wide because the serving owner's
+shared pair is unavailable to both directions. The shared pipes remain
 owned by Io and close once at server teardown. SIGPIPE is ignored only for the
 serving lifetime so splice EPIPE follows ordinary typed failure accounting.
 
@@ -497,7 +508,7 @@ The single serving owner makes another connection's concurrent borrow impossible
 | Direct event dispatch | Role/generation checks precede each drive; no second ready queue or cached per-direction readiness state. |
 | 256 KiB / 128-call quantum | Bounds per-direction work per dispatch while allowing a stream to span several buffers. |
 | Portable CPU baseline | The ordinary binary uses baseline CPU requirements; the Docker amd64-v3 profile is an explicit alternative. |
-| Adaptive buffered I/O | Drained short-message streams return to buffered forwarding and may reactivate splice for later bulk data. |
+| Adaptive buffered I/O | Each drained short-message direction returns to buffered forwarding and may reactivate splice for later bulk data independently of its peer direction. |
 
 For dataplane changes, select an explicit production revision supporting Zig 0.17.0
 and compare ordinary fast builds on the same runner. Keep rings, chunk/credit,
