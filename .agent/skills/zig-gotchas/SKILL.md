@@ -73,15 +73,21 @@ A pipe can exhaust page slots before its byte capacity; source EAGAIN with debt
 pauses reads until a successful write. Reclaim all pending bytes before returning
 to epoll, including fatal/yield exits; teardown never closes borrowed handles.
 Nonblocking connect success is checked with SO_ERROR only after that fd is ready.
-recv/send/shutdown/SO_ERROR carry `Result(T)` with the exact non-exhaustive Linux.E,
+Connect/recv/send/shutdown/SO_ERROR carry `Result(T)` with the exact non-exhaustive
+Linux.E,
 not generic errors or a shared mutable errno slot. SO_ERROR's returned integer is
 a positive errno, unlike the negative raw syscall result. Reading SO_ERROR clears
 it; do not add probes merely to collect diagnostics on successful I/O.
 
 Runtime logging uses the single-owner Logger, not std.log's global settings or
-stderr mutex. Keep raw counters separate from log interval baselines, with wrapping
-differences for events and unchanged gauges. Validate none/error/warn/info/debug
-and text/json before any startup resolution. Keep SIGUSR2 in the signalfd mask;
+stderr mutex. Keep raw counters separate from fixed failure batches and the traffic
+baseline. Divide wrapping byte deltas by actual monotonic elapsed time; keep
+cumulative totals intact and suppress unchanged active/traffic gauges. A zero-time
+summary retains its pending window rather than fabricating a rate. Non-exhaustive
+errno names use `std.enums.tagName(E, value)` with UNKNOWN fallback, never unchecked
+`@tagName`. Keep the batch's last-event context explicit. DEBUG stores acceptance time,
+config-owned route and final phase only at lifecycle boundaries. Validate
+none/error/warn/info/debug and text/json before any startup resolution. Keep SIGUSR2 in the signalfd mask;
 explicit snapshots and --check bypass automatic verbosity. Escape message control
 bytes and preserve fixed-buffer worst-case bounds, including max-u64 byte units.
 

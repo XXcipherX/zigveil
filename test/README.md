@@ -22,7 +22,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | Failures | Connect/read/write failures, fatal shutdown and ENOTCONN with pending reset on both peers |
 | Error dimensions | Exact errno through production read/write/shutdown/SO_ERROR paths; both socket roles, unknown errno, zero writes, aggregate consistency and no double count |
 | Stats bounds | Maximum-width u64 values produce complete JSON within the fixed 4096-byte buffer |
-| Logging | Severity filtering, one-second delta batching, idle suppression, control/JSON escaping, maximum-width totals and byte units |
+| Logging | Severity filtering, fixed one-second failure batches, cumulative traffic and actual elapsed rates, idle suppression, control/JSON escaping and maximum-width context/units |
 | Shared kernel queues | Exact prefix ordering, empty borrow/return, slow writes and ring spills, uneven reads at fairness boundaries, source EAGAIN and page pressure, both FIN orders, RST/EPIPE/ENOTCONN, allocation failure, reuse and small/large phase transitions |
 | Time | Hello/connect/prefix/idle expiry and disabled established idle |
 | Lifetime | Pool exhaustion, role/generation tokens and stale events after reuse |
@@ -47,10 +47,12 @@ empty input, fd/staging recovery with one slot, no unrelated connect failover an
 config preflight/version validation. Certificates are generated temporarily
 by OpenSSL. It does not require third-party Python packages.
 
-Live logging tests check compact text, explicit grouped totals, warning bursts,
-info/warn/error/none filtering, the SIGUSR2 cycle, snapshots while muted and precise
-debug RST details without payload leakage or changes to error accounting. Invalid
-logging settings fail before bind. Readiness checks an owned socket without probe
+Live logging tests check compact cumulative text, rates, explicit grouped totals,
+quiet established idle connections, warning bursts with backend/errno context and
+exhausted-pool identification, info/warn/error/none filtering, the SIGUSR2 cycle,
+snapshots while muted, hello/idle expiry severity and one DEBUG close with lifetime,
+configured route and precise RST details without payload leakage or changed accounting.
+Invalid logging settings fail before bind. Readiness checks an owned socket without probe
 traffic and works independently of INFO output.
 
 Controlled client and backend RST tests use zero SO_LINGER after an echoed prefix.

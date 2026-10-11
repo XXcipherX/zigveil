@@ -43,8 +43,11 @@ before registry builds/uploads. Keep standalone and caller CI concurrency separa
 Mandatory shared-splice workloads use --require-workloads, so topology refusal
 cannot pass CI. Use one generator there to keep correctness coverage executable
 on smaller runners; separate performance experiments may require more distinct CPUs.
-Logging changes verify live levels, SIGUSR1/USR2, idle suppression, grouped rate
-limits, bounded escaping/units and unchanged JSON counters through actual sockets.
+Logging changes verify live levels, SIGUSR1/USR2, cumulative traffic, actual elapsed
+rate windows, idle suppression with active connections, fixed failure batches and
+their last-event context, bounded escaping/units and unchanged JSON counters.
+Cover hello/idle versus connect/prefix severity and one DEBUG close with lifetime,
+config-owned route and exact errno through actual sockets and artificial I/O.
 Keep daemon readiness independent of log verbosity.
 DNS changes preserve bounded startup/check completion with a silent resolver and
 continuous malformed or duplicate replies. Deterministic ready-I/O tests cover

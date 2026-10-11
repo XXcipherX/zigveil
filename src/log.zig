@@ -3,14 +3,16 @@ const std = @import("std");
 const linux = std.os.linux;
 const counters_mod = @import("counters.zig");
 const Counters = counters_mod.Counters;
+const outcome = @import("io_result.zig");
 
 pub const Level = enum { none, @"error", warn, info, debug };
 pub const Format = enum { text, json };
-const message_capacity = 512;
+const message_capacity = 640;
 const line_capacity = 4096;
 
 pub const Bytes = struct {
     value: u64,
+    two_decimals: bool = false,
 
     pub fn format(self: Bytes, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const units = [_][]const u8{ "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" };
@@ -18,9 +20,69 @@ pub const Bytes = struct {
         var divisor: u64 = 1;
         while (unit < units.len - 1 and self.value / divisor >= 1024) : (unit += 1) divisor *= 1024;
         if (unit == 0) return writer.print("{d}B", .{self.value});
-        const fraction: u64 = @intCast(@as(u128, self.value % divisor) * 10 / divisor);
-        try writer.print("{d}.{d}{s}", .{ self.value / divisor, fraction, units[unit] });
+        if (self.two_decimals) {
+            const fraction: u64 = @intCast(@as(u128, self.value % divisor) * 100 / divisor);
+            try writer.print("{d}.{d:0>2}{s}", .{ self.value / divisor, fraction, units[unit] });
+        } else {
+            const fraction: u64 = @intCast(@as(u128, self.value % divisor) * 10 / divisor);
+            try writer.print("{d}.{d}{s}", .{ self.value / divisor, fraction, units[unit] });
+        }
     }
+};
+
+const Seconds = struct {
+    ms: u64,
+
+    pub fn format(self: Seconds, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.ms % 1000 == 0) return writer.print("{d}", .{self.ms / 1000});
+        try writer.print("{d}.{d:0>3}", .{ self.ms / 1000, self.ms % 1000 });
+    }
+};
+
+const Rate = struct {
+    bytes: u64,
+    elapsed_ms: u64,
+
+    pub fn format(self: Rate, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const units = [_][]const u8{ "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" };
+        // The numerator is at most u64 * 1000; its remainder * 100 also fits.
+        const numerator = @as(u128, self.bytes) * 1000;
+        var divisor: u128 = @max(self.elapsed_ms, 1);
+        var unit: usize = 0;
+        while (unit < units.len - 1 and numerator / divisor >= 1024) : (unit += 1) divisor *= 1024;
+        try writer.print("{d}.{d:0>2}{s}/s", .{ numerator / divisor, numerator % divisor * 100 / divisor, units[unit] });
+    }
+};
+
+pub const Phase = enum { accept, hello, connect, prefix, relay, idle };
+pub const Context = struct {
+    phase: Phase,
+    backend: ?std.Io.net.IpAddress = null,
+    errno: ?linux.E = null,
+    side: ?outcome.Side = null,
+    operation: ?outcome.Operation = null,
+};
+pub const Warning = enum { connect_failures, connect_timeouts, prefix_timeouts, connection_capacity, handshake_capacity, accept_pressure, socket_setup, metadata_failed, network_failures };
+const Warnings = struct {
+    connect_failures: u64 = 0,
+    connect_timeouts: u64 = 0,
+    prefix_timeouts: u64 = 0,
+    connection_capacity: u64 = 0,
+    handshake_capacity: u64 = 0,
+    accept_pressure: u64 = 0,
+    socket_setup: u64 = 0,
+    metadata_failed: u64 = 0,
+    network_failures: u64 = 0,
+};
+const Errors = struct { other_io_errors: u64 = 0, zero_writes: u64 = 0 };
+pub const Closed = struct {
+    id: u64,
+    lifetime_ms: u64,
+    route: []const u8,
+    reason: []const u8,
+    context: Context,
+    zero_write: bool = false,
+    hello_timeout: bool = false,
 };
 
 /// The sink seam captures the production logger in unit tests. Serving uses stderr.
@@ -34,7 +96,11 @@ pub const Logger = struct {
     format: Format = .text,
     sink: Sink = .{},
     previous_activity: Counters = .{},
-    previous_warning: Counters = .{},
+    previous_activity_ms: u64 = 0,
+    pending_warning: Warnings = .{},
+    last_warning: ?struct { kind: Warning, context: Context } = null,
+    pending_error: Errors = .{},
+    last_error: ?Context = null,
     warning_due_ms: u64 = 0,
 
     pub fn enabled(self: *const Logger, level: Level) bool {
@@ -43,7 +109,11 @@ pub const Logger = struct {
 
     pub fn begin(self: *Logger, now: u64, counts: *const Counters) void {
         self.previous_activity = counts.*;
-        self.previous_warning = counts.*;
+        self.previous_activity_ms = now;
+        self.pending_warning = .{};
+        self.last_warning = null;
+        self.pending_error = .{};
+        self.last_error = null;
         self.warning_due_ms = now +| 1000;
     }
 
@@ -63,42 +133,94 @@ pub const Logger = struct {
         self.sink.write(self.sink.context, render(self.format, level, event, body, wallSeconds(), &line));
     }
 
-    /// Consume each error delta once, with at most one line per severity per second.
-    pub fn tick(self: *Logger, now: u64, counts: *const Counters) void {
+    /// Record only cold failure paths; the full machine counters remain separate.
+    pub fn warning(self: *Logger, kind: Warning, context: Context) void {
+        if (!self.enabled(.warn)) return;
+        inline for (@typeInfo(Warning).@"enum".field_names) |name| if (kind == @field(Warning, name)) {
+            @field(self.pending_warning, name) +%= 1;
+        };
+        self.last_warning = .{ .kind = kind, .context = context };
+    }
+
+    pub fn ioFailure(self: *Logger, context: Context, failure: outcome.Failure) void {
+        switch (failure) {
+            .errno => |err| switch (err) {
+                .CONNRESET, .PIPE => return,
+                .NOTCONN, .CONNABORTED, .TIMEDOUT, .NETRESET, .NETDOWN, .NETUNREACH, .HOSTDOWN, .HOSTUNREACH, .NONET => {
+                    self.warning(.network_failures, context);
+                    return;
+                },
+                else => {
+                    if (!self.enabled(.@"error")) return;
+                    self.pending_error.other_io_errors +%= 1;
+                },
+            },
+            .zero_write => {
+                if (!self.enabled(.@"error")) return;
+                self.pending_error.zero_writes +%= 1;
+            },
+        }
+        self.last_error = context;
+    }
+
+    /// Consume each batch once, with at most one line per severity per second.
+    pub fn tick(self: *Logger, now: u64) void {
         if (now < self.warning_due_ms) return;
-        self.flush(counts);
+        self.flush();
         self.warning_due_ms = now +| 1000;
     }
 
-    pub fn flush(self: *Logger, counts: *const Counters) void {
-        const changes = delta(counts.*, self.previous_warning);
-        self.previous_warning = counts.*;
-        if (self.enabled(.warn)) if (group("failures", changes, &.{
-            "connect_failures", "timeouts",          "rejected",        "accept_errors",  "invalid_client_hello",
-            "not_connected",    "connection_aborts", "socket_timeouts", "network_errors",
-        })) |body| self.emit(.warn, "failures", body.slice());
-        if (self.enabled(.@"error")) if (group("socket failures", changes, &.{ "other_io_errors", "zero_writes" })) |value| {
+    pub fn flush(self: *Logger) void {
+        if (self.enabled(.warn)) if (group("warnings |", self.pending_warning, @typeInfo(Warnings).@"struct".field_names)) |value| {
             var body = value;
-            if (changes.other_io_errors != 0) body.append(" last_other_io_errno={d}", .{counts.last_other_io_errno});
+            if (self.last_warning) |last| {
+                body.append(" | last: cause={s}", .{@tagName(last.kind)});
+                appendContext(&body, last.context);
+            }
+            self.emit(.warn, "failures", body.slice());
+        };
+        if (self.enabled(.@"error")) if (group("socket failures |", self.pending_error, @typeInfo(Errors).@"struct".field_names)) |value| {
+            var body = value;
+            body.append(" | last:", .{});
+            if (self.last_error) |context| appendContext(&body, context);
             self.emit(.@"error", "io_failure", body.slice());
         };
+        self.pending_warning = .{};
+        self.last_warning = null;
+        self.pending_error = .{};
+        self.last_error = null;
     }
 
-    pub fn periodic(self: *Logger, counts: *const Counters) void {
+    pub fn periodic(self: *Logger, now: u64, counts: *const Counters) void {
+        // A level change can arrive in the same millisecond as a summary.
+        // Retain its pending window rather than inventing an elapsed interval.
+        if (now <= self.previous_activity_ms) return;
+        const elapsed = now - self.previous_activity_ms;
         const changes = delta(counts.*, self.previous_activity);
-        const changed = !std.meta.eql(counts.*, self.previous_activity);
+        const changed = if (self.format == .json)
+            !std.meta.eql(counts.*, self.previous_activity)
+        else
+            counts.active != self.previous_activity.active or
+                counts.bytes_client_to_backend != self.previous_activity.bytes_client_to_backend or
+                counts.bytes_backend_to_client != self.previous_activity.bytes_backend_to_client;
         self.previous_activity = counts.*;
-        if (!self.enabled(.info) or (!changed and counts.active == 0)) return;
+        self.previous_activity_ms = now;
+        if (!self.enabled(.info) or !changed) return;
         if (self.format == .json) return self.jsonSnapshot(counts);
-        const body = activity(changes);
-        self.forceMessage(.info, "activity", "activity; {s}", .{body.slice()});
+        self.forceMessage(.info, "activity", "stats | active={d} | avg({f}s): up={f} down={f} | total: up={f} down={f}", .{
+            counts.active,                                                           Seconds{ .ms = elapsed },
+            Rate{ .bytes = changes.bytes_client_to_backend, .elapsed_ms = elapsed }, Rate{ .bytes = changes.bytes_backend_to_client, .elapsed_ms = elapsed },
+            Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true },  Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
+        });
     }
 
     pub fn stopped(self: *Logger, counts: *const Counters) void {
-        self.flush(counts);
+        self.flush();
         if (!self.enabled(.info)) return;
-        const body = activity(counts.*);
-        self.forceMessage(.info, "stopped", "stopped; {s}", .{body.slice()});
+        self.forceMessage(.info, "stopped", "stopped | accepted={d} closed={d} | total: up={f} down={f}", .{
+            counts.accepted,                                                        counts.closed,
+            Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true }, Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
+        });
         if (self.format == .json) self.jsonSnapshot(counts);
     }
 
@@ -108,8 +230,8 @@ pub const Logger = struct {
         self.forceMessage(.info, "stats", "totals active={d} accepted={d} routed={d} closed={d}", .{
             counts.active, counts.accepted, counts.routed, counts.closed,
         });
-        self.forceMessage(.info, "stats", "traffic sent={f} received={f}", .{
-            Bytes{ .value = counts.bytes_client_to_backend }, Bytes{ .value = counts.bytes_backend_to_client },
+        self.forceMessage(.info, "stats", "traffic | total: up={f} down={f}", .{
+            Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true }, Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
         });
         const Group = struct { title: []const u8, fields: []const []const u8 };
         inline for ([_]Group{
@@ -129,10 +251,27 @@ pub const Logger = struct {
         self.sink.write(self.sink.context, counts.snapshot(&bytes));
     }
 
+    /// One final lifecycle record; route names refer only to immutable config.
+    pub fn closed(self: *const Logger, detail: Closed) void {
+        if (!self.enabled(.debug)) return;
+        // A configured DNS name is at most 253 bytes; CloseReason tags fit 32.
+        std.debug.assert(detail.route.len <= 253 and detail.reason.len <= 32);
+        comptime {
+            if (253 + 32 + 20 + 24 + 100 + 160 + 20 > message_capacity) @compileError("Close context exceeds log message buffer");
+        }
+        var body: Message = .{};
+        body.append("connection id={d} | closed | duration={f}s | route={s} | reason={s}", .{
+            detail.id, Seconds{ .ms = detail.lifetime_ms }, detail.route, if (detail.zero_write) "zero_write" else detail.reason,
+        });
+        appendContext(&body, detail.context);
+        if (detail.hello_timeout) body.append(" hello_timeout=true", .{});
+        self.emit(.debug, "connection_closed", body.slice());
+    }
+
     /// A temporary runtime setting; a restart restores the configuration value.
     pub fn cycle(self: *Logger, now: u64, counts: *const Counters) void {
-        self.flush(counts);
-        self.periodic(counts);
+        self.flush();
+        self.periodic(now, counts);
         self.level = switch (self.level) {
             .info => .debug,
             .debug => .none,
@@ -159,11 +298,12 @@ const Message = struct {
     }
 };
 
-fn group(comptime title: []const u8, counts: Counters, comptime fields: []const []const u8) ?Message {
+fn group(comptime title: []const u8, counts: anytype, comptime fields: anytype) ?Message {
     comptime {
         var bound = title.len;
         for (fields) |field_name| bound += field_name.len + 2 + 20;
-        if (bound > message_capacity - 48) @compileError("Counter group exceeds log message buffer");
+        // Reserve the longest last-event context (phase, endpoint, side/op/errno).
+        if (bound > message_capacity - 208) @compileError("Counter group exceeds log message buffer");
     }
     var body: Message = .{};
     body.append("{s}", .{title});
@@ -178,18 +318,12 @@ fn group(comptime title: []const u8, counts: Counters, comptime fields: []const 
     return if (nonzero) body else null;
 }
 
-fn activity(counts: Counters) Message {
-    var body: Message = .{};
-    body.append("active={d}", .{counts.active});
-    inline for (.{ "accepted", "routed", "fallback_routed", "closed" }) |field_name| {
-        if (@field(counts, field_name) != 0) body.append(" " ++ field_name ++ "={d}", .{@field(counts, field_name)});
-    }
-    if (counts.bytes_client_to_backend != 0) body.append(" sent={f}", .{Bytes{ .value = counts.bytes_client_to_backend }});
-    if (counts.bytes_backend_to_client != 0) body.append(" received={f}", .{Bytes{ .value = counts.bytes_backend_to_client }});
-    inline for (.{ "connection_resets", "broken_pipes", "unknown_sni", "missing_sni" }) |field_name| {
-        if (@field(counts, field_name) != 0) body.append(" " ++ field_name ++ "={d}", .{@field(counts, field_name)});
-    }
-    return body;
+fn appendContext(body: *Message, context: Context) void {
+    body.append(" phase={s}", .{@tagName(context.phase)});
+    if (context.backend) |backend| body.append(" backend={f}", .{backend});
+    if (context.side) |side| body.append(" side={s}", .{@tagName(side)});
+    if (context.operation) |operation| body.append(" operation={s}", .{@tagName(operation)});
+    if (context.errno) |err| body.append(" errno={d}({s})", .{ @backingInt(err), std.enums.tagName(linux.E, err) orelse "UNKNOWN" });
 }
 
 fn delta(current: Counters, previous: Counters) Counters {
@@ -311,30 +445,35 @@ test "logger consumes deltas once, limits bursts, filters severity and skips idl
     var logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
     var counts: Counters = .{};
     logger.begin(0, &counts);
-    logger.periodic(&counts);
+    logger.periodic(1, &counts);
     try std.testing.expectEqual(@as(usize, 0), capture.len);
     counts.connect_failures = 7;
     counts.connection_resets = 66;
     counts.broken_pipes = 6;
-    logger.tick(999, &counts);
+    for (0..7) |_| logger.warning(.connect_failures, .{ .phase = .connect, .errno = .CONNREFUSED });
+    logger.ioFailure(.{ .phase = .relay, .errno = .CONNRESET }, .{ .errno = .CONNRESET });
+    logger.ioFailure(.{ .phase = .relay, .errno = .PIPE }, .{ .errno = .PIPE });
+    logger.tick(999);
     try std.testing.expectEqual(@as(usize, 0), capture.len);
-    logger.tick(1000, &counts);
-    try std.testing.expect(std.mem.find(u8, capture.slice(), "WARN  failures connect_failures=7") != null);
+    logger.tick(1000);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "WARN  warnings | connect_failures=7 | last: cause=connect_failures phase=connect errno=111(CONNREFUSED)") != null);
     try std.testing.expect(std.mem.find(u8, capture.slice(), "connection_resets") == null);
     const once = capture.len;
-    logger.tick(2000, &counts);
+    logger.tick(2000);
     try std.testing.expectEqual(once, capture.len);
     logger.level = .@"error";
     counts.connect_failures += 1;
     counts.other_io_errors = 1;
     counts.last_other_io_errno = 4090;
-    logger.tick(3000, &counts);
-    try std.testing.expect(std.mem.find(u8, capture.slice()[once..], "ERROR socket failures other_io_errors=1 last_other_io_errno=4090") != null);
+    logger.warning(.connect_failures, .{ .phase = .connect });
+    logger.ioFailure(.{ .phase = .relay, .errno = @fromBackingInt(4090) }, .{ .errno = @fromBackingInt(4090) });
+    logger.tick(3000);
+    try std.testing.expect(std.mem.find(u8, capture.slice()[once..], "ERROR socket failures | other_io_errors=1 | last: phase=relay errno=4090(UNKNOWN)") != null);
     try std.testing.expect(std.mem.find(u8, capture.slice()[once..], "connect_failures") == null);
     logger.level = .none;
     const muted = capture.len;
     logger.message(.@"error", "test", "fatal", .{});
-    logger.periodic(&counts);
+    logger.periodic(4000, &counts);
     logger.stopped(&counts);
     try std.testing.expectEqual(muted, capture.len);
     logger.snapshot(&counts);
@@ -343,13 +482,21 @@ test "logger consumes deltas once, limits bursts, filters severity and skips idl
 
 test "maximum-width text totals, byte units and wrapping deltas stay bounded" {
     var capture: Capture = .{};
-    const logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
+    var logger: Logger = .{ .level = .debug, .sink = .{ .context = &capture, .write = Capture.write } };
     var counts: Counters = .{};
     inline for (@typeInfo(Counters).@"struct".field_names) |field_name| @field(counts, field_name) = std.math.maxInt(u64);
     logger.snapshot(&counts);
-    const summary = activity(counts);
-    try std.testing.expect(summary.len <= message_capacity);
-    try std.testing.expect(std.mem.find(u8, summary.slice(), "15.9EiB") != null);
+    logger.periodic(1, &counts);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "15.99EiB") != null);
+    const endpoint: std.Io.net.IpAddress = .{ .ip6 = .{ .bytes = @splat(255), .port = 65535 } };
+    const context: Context = .{ .phase = .connect, .backend = endpoint, .errno = .NOTRECOVERABLE, .side = .backend, .operation = .socket_error };
+    inline for (@typeInfo(Warnings).@"struct".field_names) |field_name| @field(logger.pending_warning, field_name) = std.math.maxInt(u64);
+    logger.last_warning = .{ .kind = .connection_capacity, .context = context };
+    logger.flush();
+    const route: [253]u8 = @splat('a');
+    logger.closed(.{ .id = std.math.maxInt(u64), .lifetime_ms = std.math.maxInt(u64), .route = &route, .reason = "proxy_metadata_failed", .context = context, .hello_timeout = true });
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "message exceeds log limit") == null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "hello_timeout=true") != null);
     counts.accepted = 2;
     const changes = delta(counts, .{ .accepted = std.math.maxInt(u64) });
     try std.testing.expectEqual(@as(u64, 3), changes.accepted);
@@ -360,21 +507,64 @@ test "maximum-width text totals, byte units and wrapping deltas stay bounded" {
 test "level changes flush visible pending failures without replaying muted counts" {
     var capture: Capture = .{};
     var logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
-    var counts: Counters = .{ .accepted = 3, .closed = 3, .connect_failures = 3 };
+    var counts: Counters = .{ .accepted = 3, .closed = 3, .connect_failures = 3, .bytes_client_to_backend = 4096 };
+    for (0..3) |_| logger.warning(.connect_failures, .{ .phase = .connect });
     logger.cycle(10, &counts); // info -> debug: preserve the current interval.
     try std.testing.expect(std.mem.find(u8, capture.slice(), "connect_failures=3") != null);
-    try std.testing.expect(std.mem.find(u8, capture.slice(), "activity; active=0 accepted=3 closed=3") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=0 | avg(0.010s)") != null);
     logger.cycle(20, &counts); // debug -> none
     counts.accepted += 7;
     counts.closed += 7;
     counts.connect_failures += 7;
+    for (0..7) |_| logger.warning(.connect_failures, .{ .phase = .connect });
     const muted = capture.len;
     logger.cycle(30, &counts); // none -> error
     logger.cycle(40, &counts); // error -> warn
     logger.cycle(50, &counts); // warn -> info
-    logger.tick(2000, &counts);
-    logger.periodic(&counts);
+    logger.tick(2000);
+    logger.periodic(2000, &counts);
     const resumed = capture.slice()[muted..];
     try std.testing.expect(std.mem.find(u8, resumed, "connect_failures=") == null);
-    try std.testing.expect(std.mem.find(u8, resumed, "activity;") == null);
+    try std.testing.expect(std.mem.find(u8, resumed, "stats |") == null);
+}
+
+test "traffic totals accumulate and rates use actual elapsed time without repeating an idle active connection" {
+    var capture: Capture = .{};
+    var logger: Logger = .{ .sink = .{ .context = &capture, .write = Capture.write } };
+    var counts: Counters = .{};
+    logger.begin(100, &counts);
+    counts.active = 1;
+    counts.accepted = 1;
+    counts.bytes_client_to_backend = 12800;
+    counts.bytes_backend_to_client = 25600;
+    logger.periodic(100, &counts); // No invented rate or lost data at zero elapsed.
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
+    logger.periodic(12600, &counts);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=1 | avg(12.500s): up=1.00KiB/s down=2.00KiB/s | total: up=12.50KiB down=25.00KiB") != null);
+    const first = capture.len;
+    counts.bytes_client_to_backend += 5120;
+    counts.bytes_backend_to_client += 10240;
+    logger.periodic(22600, &counts);
+    try std.testing.expect(std.mem.find(u8, capture.slice()[first..], "avg(10s): up=512.00B/s down=1.00KiB/s | total: up=17.50KiB down=35.00KiB") != null);
+    const stable = capture.len;
+    logger.periodic(32600, &counts);
+    counts.accepted += 1;
+    counts.closed += 1;
+    counts.timeouts += 1;
+    logger.periodic(42600, &counts);
+    try std.testing.expectEqual(stable, capture.len);
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("0.25B/s", try std.mem.print(&buffer, "{f}", .{Rate{ .bytes = 1, .elapsed_ms = 4000 }}));
+}
+
+test "periodic JSON preserves every original machine counter and exact bytes" {
+    var capture: Capture = .{};
+    var logger: Logger = .{ .format = .json, .sink = .{ .context = &capture, .write = Capture.write } };
+    const counts: Counters = .{ .active = 1, .bytes_client_to_backend = 12345, .bytes_backend_to_client = 67890, .timeouts = 7 };
+    logger.periodic(30000, &counts);
+    var buffer: [counters_mod.snapshot_capacity]u8 = undefined;
+    try std.testing.expectEqualStrings(counts.snapshot(&buffer), capture.slice());
+    const stable = capture.len;
+    logger.periodic(60000, &counts);
+    try std.testing.expectEqual(stable, capture.len);
 }

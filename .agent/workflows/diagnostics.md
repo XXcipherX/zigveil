@@ -16,11 +16,16 @@ kill -USR2 "$PID"
 ```
 
 Use an explicit PID for each process. Default info/text logs show lifecycle events,
-compact interval activity and live warning/error groups. Idle/zero fields are quiet.
+active connections, cumulative up/down traffic and rates over the actual displayed
+interval. Unchanged active/traffic gauges are quiet, including live idle connections.
+Warning/error groups use independent one-second batches; counts cover the batch,
+while `last:` describes only its most recent event. Connect/prefix timeouts and
+admission/resource pressure warn. Hello and idle timeout observations stay diagnostic.
 SIGUSR1 requests cumulative grouped totals, or complete JSON with log_format json,
 even at log_level none. SIGUSR2 cycles info/debug/none/error/warn and confirms the
-change; restart restores config verbosity. debug shows connection IDs, phase/close
-reasons and exact fatal socket metadata, without payloads or client IPs. Changing
+change; restart restores config verbosity. DEBUG shows one close per connection,
+with ID, lifetime, configured route, final phase/reason and exact fatal connect/socket
+metadata, without payloads or client IPs. Changing
 verbosity does not reset counters or replay previously muted failures.
 No packet logging or admin listener is available.
 
@@ -57,8 +62,8 @@ operation and one cause, so sum each dimension separately against `io_errors`.
 `last_other_io_errno` records only the most recent unclassified numeric errno and
 must not be summed. `socket_timeouts` (ETIMEDOUT) differ from proxy deadlines.
 Clean FIN and retry outcomes remain uncounted; ECONNRESET/EPIPE stay fatal observed
-socket outcomes. They appear in info summaries/debug closes instead of one warning
-per teardown. Other live failures are grouped at most once per severity per second,
+socket outcomes. They appear in explicit totals/debug closes without routine INFO
+fields or warnings. Other live failures are grouped at most once per severity per second,
 independent of stats_interval_ms. Use a controlled reproduction and workload evidence to decide
 whether these outcomes are expected; the snapshot cannot reconstruct old runs.
 

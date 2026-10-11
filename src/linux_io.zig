@@ -39,28 +39,34 @@ pub const Io = struct {
         }
     }
 
-    pub fn startConnect(self: *Io, endpoint: Address) !Connect {
+    pub fn startConnect(self: *Io, endpoint: Address) Result(Connect) {
         const addr = SockAddress.init(endpoint);
-        const fd = try socket(addr.storage.family);
-        errdefer {
+        const fd = switch (socketResult(addr.storage.family)) {
+            .ok => |fd| fd,
+            .err => |err| return .{ .err = err },
+        };
+        var transferred = false;
+        defer if (!transferred) {
             self.metrics.add("close", 1);
             close(fd);
+        };
+        switch (optionResult(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1)) {
+            .ok => {},
+            .err => |err| return .{ .err = err },
         }
-        try option(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1);
         self.metrics.add("connect", 1);
         const rc = linux.connect(fd, &addr.storage, addr.len);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => .{ .fd = fd, .complete = true },
-            .INPROGRESS, .INTR => .{ .fd = fd, .complete = false },
-            else => error.BackendConnectFailed,
+        const complete = switch (linux.errno(rc)) {
+            .SUCCESS => true,
+            .INPROGRESS, .INTR => false,
+            else => |err| return .{ .err = err },
         };
+        transferred = true;
+        return .{ .ok = .{ .fd = fd, .complete = complete } };
     }
 
-    pub fn finishConnect(self: *Io, fd: i32) !void {
-        switch (socketError(fd, &self.metrics)) {
-            .ok => {},
-            .err => return error.SocketError,
-        }
+    pub fn finishConnect(self: *Io, fd: i32) Result(void) {
+        return socketError(fd, &self.metrics);
     }
 
     pub fn checkSocketError(self: *Io, fd: i32) Result(void) {
@@ -259,14 +265,28 @@ test "socket endpoint decoding preserves address memory bytes and validates retu
 }
 
 fn socket(family: u16) !i32 {
+    return switch (socketResult(family)) {
+        .ok => |fd| fd,
+        .err => error.SocketCreateFailed,
+    };
+}
+
+fn socketResult(family: u16) Result(i32) {
     const rc = linux.socket(family, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, linux.IPPROTO.TCP);
-    if (linux.errno(rc) != .SUCCESS) return error.SocketCreateFailed;
-    return @intCast(rc);
+    const err = linux.errno(rc);
+    return if (err == .SUCCESS) .{ .ok = @intCast(rc) } else .{ .err = err };
 }
 
 pub fn option(fd: i32, level: i32, name: u32, value: i32) !void {
+    switch (optionResult(fd, level, name, value)) {
+        .ok => {},
+        .err => return error.SocketOptionFailed,
+    }
+}
+
+fn optionResult(fd: i32, level: i32, name: u32, value: i32) Result(void) {
     const bytes = std.mem.asBytes(&value);
-    if (linux.errno(linux.setsockopt(fd, level, name, bytes.ptr, @intCast(bytes.len))) != .SUCCESS) return error.SocketOptionFailed;
+    return statusResult(linux.errno(linux.setsockopt(fd, level, name, bytes.ptr, @intCast(bytes.len))));
 }
 
 fn socketError(fd: i32, metrics: *@import("metrics.zig").Metrics) Result(void) {

@@ -385,28 +385,46 @@ for an explicitly requested or enabled JSON periodic/final snapshot.
 
 ## Live logging
 
-`log.zig` owns the level, format and two previous counter snapshots through a Logger
-borrowed by Server from main. The serving loop owns all logger mutations, including
-SIGUSR2 level changes. There is no global logger, mutex, logging worker, heap queue
+`log.zig` owns the level, format, one previous counter snapshot and fixed warning/error
+batches through a Logger borrowed by Server from main. The serving loop owns all
+logger mutations, including SIGUSR2 level changes. There is no global logger, mutex, logging worker, heap queue
 or per-packet formatting. Levels are filtered before formatting or wall-clock I/O.
 
 Default text output has UTC timestamps, aligned severity labels and human-readable
-byte volumes. Periodic activity uses wrapping counter differences and the current
-active gauge; idle zero-activity intervals are suppressed. Warning/error differences
-are consumed at most once per second, with one grouped line per severity and a final
-flush on shutdown. Consuming disabled levels and resetting baselines on SIGUSR2
-prevents replay of errors that occurred while muted. Counters themselves never reset.
-Level changes flush enabled pending warning/activity data before resetting baselines.
+byte volumes. Text INFO contains the current active gauge, cumulative original-stream
+up/down bytes since startup, and average up/down rates. Rate numerators use wrapping
+byte-counter differences; denominators use actual monotonic elapsed milliseconds,
+including when the event loop wakes late. Scaled totals and rates have two decimals.
+Unchanged traffic/active gauges suppress the line even with live idle connections.
+JSON periodic stats still observe changes in all original counters.
+
+Server records warning/error events only on admission failures and teardown. Fixed
+batches distinguish backend connect failure, connect/prefix expiry, the exhausted
+connection/handshake pool, accept resource pressure, socket setup, unsupported
+metadata and network I/O failure. One grouped line per severity is emitted at most
+once per second. Its counts cover all events, while `last:` describes only the most
+recent event's phase/endpoint/errno. There are no per-backend maps or growing queues.
+Hello/idle expiry, invalid or unknown names, ECONNRESET and EPIPE remain in full
+diagnostics/debug, without automatic warnings. Other unexpected I/O errors and zero
+writes remain ERROR. No reset-count threshold escalates their severity.
+Shutdown and level changes flush enabled pending batches. Disabled levels discard
+events; advancing summary baselines and resetting batches on SIGUSR2 prevents replay
+when logs resume. Raw counters never reset.
 The [README](../README.md#logging) defines the severity policy and signal cycle.
 
-Detailed lifecycle output is opt-in at debug and occurs only at phase changes and
-teardown. A slot stores the fatal I/O side/operation/result only on failure, without
-another syscall or counter update. The ID is the generation-tagged client token,
-so reused slots remain distinguishable. Logs never borrow a staged name or payload.
+Detailed lifecycle output is opt-in at debug and emits one final record at teardown.
+A slot retains acceptance time, the configured route pointer/fallback flag, final
+phase and exact fatal connect/I/O result by value. Immediate and asynchronous connect
+failures keep their errno, while remaining separate from relay `io_errors`.
+Lifetime uses the loop's existing monotonic batch timestamp, without another clock
+syscall per close. A partial hello deadline selecting fallback is retained as a flag.
+The ID is the generation-tagged client token, so reused slots remain distinguishable.
+Route pointers refer to immutable config that outlives Server; no staged name or
+payload slice survives. No new successful recv/send/splice bookkeeping is needed.
 SIGUSR1 bypasses the verbosity threshold because it is an explicit diagnostic.
 Text totals omit zero fields; JSON retains the complete existing counter schema.
 
-Messages are bounded to 512 bytes and output lines to 4096. Counter groups have
+Messages are bounded to 640 bytes and output lines to 4096. Counter groups have
 compile-time maximum-width bounds; JSON/text escaping prevents newlines and control
 bytes from forging events or terminal controls. The line bound covers six-byte JSON
 escapes for every message byte. Byte-unit arithmetic remains safe at maximum u64.

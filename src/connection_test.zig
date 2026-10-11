@@ -102,16 +102,16 @@ const Fake = struct {
         return .{ .ok = proxy_protocol.encode(header, self.peer, self.local) catch return .unsupported };
     }
 
-    pub fn startConnect(self: *Fake, destination: Address) !engine.Connect {
+    pub fn startConnect(self: *Fake, destination: Address) outcome.Result(engine.Connect) {
         self.connects += 1;
         self.destination = destination;
-        if (self.connect_failed) return error.ConnectFailed;
-        return .{ .fd = 2, .complete = self.immediate };
+        if (self.connect_failed) return .{ .err = .CONNREFUSED };
+        return .{ .ok = .{ .fd = 2, .complete = self.immediate } };
     }
 
-    pub fn finishConnect(self: *Fake, _: i32) !void {
+    pub fn finishConnect(self: *Fake, _: i32) outcome.Result(void) {
         self.completions += 1;
-        if (self.finish_failed) return error.ConnectFailed;
+        return if (self.finish_failed) .{ .err = .CONNREFUSED } else .{ .ok = {} };
     }
 
     pub fn openRelayPipes(self: *Fake, _: usize) ?relay_pipe.Pair {
@@ -653,6 +653,9 @@ test "connect readiness, immediate failure and asynchronous SO_ERROR failure" {
     pending.io.finish_failed = true;
     pending.drive(&config, 1);
     try std.testing.expectEqual(engine.CloseReason.connect_failed, pending.conn.reason);
+    try std.testing.expectEqual(outcome.Errno.CONNREFUSED, pending.conn.connect_errno.?);
+    try std.testing.expectEqual(@import("log.zig").Phase.connect, pending.conn.closed_phase);
+    try std.testing.expect(pending.conn.route == &config.routes[0]);
     try std.testing.expectEqual(@as(u64, 1), pending.counts.connect_failures);
     try std.testing.expectEqual(@as(u64, 0), pending.counts.io_errors);
     try expectIoConsistent(pending.counts);
@@ -661,6 +664,8 @@ test "connect readiness, immediate failure and asynchronous SO_ERROR failure" {
     failed.io.connect_failed = true;
     failed.drive(&config, 1);
     try std.testing.expectEqual(engine.CloseReason.connect_failed, failed.conn.reason);
+    try std.testing.expectEqual(outcome.Errno.CONNREFUSED, failed.conn.connect_errno.?);
+    try std.testing.expectEqual(@import("log.zig").Phase.connect, failed.conn.closed_phase);
     try std.testing.expectEqual(@as(u64, 0), failed.counts.io_errors);
     try expectIoConsistent(failed.counts);
 }
@@ -697,6 +702,13 @@ test "absolute hello, connect, prefix and idle deadlines; idle can be disabled" 
         try std.testing.expect(rig.conn.state != .closed);
         rig.conn.expire(&rig.io, &config, 5000, &rig.counts);
         try std.testing.expectEqual(engine.CloseReason.timeout, rig.conn.reason);
+        const expected: @import("log.zig").Phase = switch (state) {
+            .hello => .hello,
+            .connecting => .connect,
+            .relaying => .prefix,
+            .closed => unreachable,
+        };
+        try std.testing.expectEqual(expected, rig.conn.closed_phase);
         rig.conn.expire(&rig.io, &config, 6000, &rig.counts);
         try std.testing.expectEqual(@as(u64, 1), rig.counts.timeouts);
     }
@@ -704,6 +716,7 @@ test "absolute hello, connect, prefix and idle deadlines; idle can be disabled" 
     idle.relay();
     idle.conn.expire(&idle.io, &config, 300000, &idle.counts);
     try std.testing.expectEqual(engine.CloseReason.timeout, idle.conn.reason);
+    try std.testing.expectEqual(@import("log.zig").Phase.idle, idle.conn.closed_phase);
     idle.relay();
     config.raw.value.idle_timeout_ms = 0;
     idle.conn.expire(&idle.io, &config, 9_000_000, &idle.counts);
@@ -815,6 +828,8 @@ test "partial hello deadline selects bounded fallback once, empty EOF and timeou
             try std.testing.expectEqual(@as(usize, 1), rig.io.connects);
             try std.testing.expectEqual(@as(u64, 1), rig.counts.fallback_routed);
             try std.testing.expectEqual(@as(u64, if (eof) 0 else 1), rig.counts.timeouts);
+            try std.testing.expectEqual(!eof, rig.conn.hello_timeout);
+            try std.testing.expect(rig.conn.fallback and rig.conn.route == null);
             try std.testing.expectEqual(@as(u64, if (eof) 1 else 0), rig.counts.invalid_client_hello);
             try std.testing.expect(!rig.conn.to_backend.fin);
             try std.testing.expectEqual(@as(?u64, if (eof) 5001 else 10000), rig.conn.deadline(config.raw.value));

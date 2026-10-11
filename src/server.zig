@@ -38,6 +38,7 @@ pub const Server = struct {
     listener_registered: bool = true,
     accept_resume_ms: u64 = 0,
     stop_deadline_ms: ?u64 = null,
+    now_ms: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger) !Server {
         const raw = config.raw.value;
@@ -127,6 +128,7 @@ pub const Server = struct {
         });
         var events: [256]linux.epoll_event = undefined;
         var now = try net.nowMs();
+        self.now_ms = now;
         self.log.begin(now, &self.counts);
         var stats = now + self.config.raw.value.stats_interval_ms;
         while (true) {
@@ -147,6 +149,7 @@ pub const Server = struct {
             self.io.metrics.maximum("epoll_max_batch", rc);
             if (rc == events.len) self.io.metrics.add("epoll_full_batches", 1);
             now = try net.nowMs();
+            self.now_ms = now;
             for (events[0..rc]) |event| {
                 const token = event.data.u64;
                 if (token == 0) {
@@ -175,6 +178,7 @@ pub const Server = struct {
             // Only due heap entries are visited. Activity can postpone an idle
             // deadline without touching the heap on every successful recv/send.
             now = try net.nowMs();
+            self.now_ms = now;
             for (0..256) |_| {
                 const timer = self.timers.first() orelse break;
                 if (timer.when > now) break;
@@ -194,10 +198,10 @@ pub const Server = struct {
                 self.listener_registered = true;
             }
             if (self.config.raw.value.stats_interval_ms != 0 and now >= stats) {
-                self.log.periodic(&self.counts);
+                self.log.periodic(now, &self.counts);
                 stats = now + self.config.raw.value.stats_interval_ms;
             }
-            self.log.tick(now, &self.counts);
+            self.log.tick(now);
         }
         for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
         self.log.stopped(&self.counts);
@@ -212,6 +216,7 @@ pub const Server = struct {
                 self.counts.accept_errors +%= 1;
                 if (err == error.TransientConnectionError) continue;
                 if (err != error.ResourcePressure) return err;
+                self.log.warning(.accept_pressure, .{ .phase = .accept });
                 try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0, &self.io.metrics);
                 self.listener_registered = false;
                 self.accept_resume_ms = now + 250;
@@ -220,12 +225,14 @@ pub const Server = struct {
             self.counts.accepted +%= 1;
             if (self.pool.free == null or self.stages.free == null) {
                 self.counts.rejected +%= 1;
+                self.log.warning(if (self.pool.free == null) .connection_capacity else .handshake_capacity, .{ .phase = .accept });
                 self.io.metrics.add("close", 1);
                 net.close(fd);
                 continue;
             }
             net.option(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1) catch {
                 self.counts.rejected +%= 1;
+                self.log.warning(.socket_setup, .{ .phase = .accept });
                 self.io.metrics.add("close", 1);
                 net.close(fd);
                 continue;
@@ -258,8 +265,6 @@ pub const Server = struct {
         };
         const prefix = slot.conn.stage != null;
         if (slot.timer_state == null or slot.timer_state.? != slot.conn.state or slot.timer_prefix != prefix) {
-            if (slot.timer_state == null or slot.timer_state.? != slot.conn.state)
-                self.log.message(.debug, "connection", "connection id={d} phase={s}", .{ self.pool.token(index, false), @tagName(slot.conn.state) });
             self.timers.set(index, slot.conn.deadline(self.config.raw.value));
             slot.timer_state = slot.conn.state;
             slot.timer_prefix = prefix;
@@ -291,18 +296,41 @@ pub const Server = struct {
     fn drop(self: *Server, index: u32) void {
         const slot = &self.slots[index];
         if (slot.conn.state != .closed) slot.conn.close(.stopping);
+        var context: logging.Context = .{
+            .phase = slot.conn.closed_phase,
+            .backend = if (slot.conn.route) |route| route.backend else if (slot.conn.fallback) self.config.fallback else null,
+            .errno = slot.conn.connect_errno,
+        };
+        var zero_write = false;
+        if (slot.conn.io_failure) |detail| {
+            context.side = detail.side;
+            context.operation = detail.operation;
+            switch (detail.failure) {
+                .errno => |err| context.errno = err,
+                .zero_write => zero_write = true,
+            }
+            self.log.ioFailure(context, detail.failure);
+        }
+        switch (slot.conn.reason) {
+            .connect_failed => self.log.warning(.connect_failures, context),
+            .timeout => switch (context.phase) {
+                .connect => self.log.warning(.connect_timeouts, context),
+                .prefix => self.log.warning(.prefix_timeouts, context),
+                else => {}, // Hello and ordinary idle expiry are diagnostic data.
+            },
+            .proxy_metadata_failed => self.log.warning(.metadata_failed, context),
+            else => {},
+        }
         if (self.log.enabled(.debug)) {
-            const id = self.pool.token(index, false);
-            if (slot.conn.io_failure) |detail| {
-                switch (detail.failure) {
-                    .errno => |err| self.log.message(.debug, "connection_closed", "connection id={d} closed reason=io_error side={s} operation={s} errno={d}", .{
-                        id, @tagName(detail.side), @tagName(detail.operation), @backingInt(err),
-                    }),
-                    .zero_write => self.log.message(.debug, "connection_closed", "connection id={d} closed reason=zero_write side={s} operation={s}", .{
-                        id, @tagName(detail.side), @tagName(detail.operation),
-                    }),
-                }
-            } else self.log.message(.debug, "connection_closed", "connection id={d} closed reason={s}", .{ id, @tagName(slot.conn.reason) });
+            self.log.closed(.{
+                .id = self.pool.token(index, false),
+                .lifetime_ms = self.now_ms -| slot.conn.accepted_ms,
+                .route = if (slot.conn.route) |route| route.name.slice() else if (slot.conn.fallback) "fallback" else "unselected",
+                .reason = @tagName(slot.conn.reason),
+                .context = context,
+                .zero_write = zero_write,
+                .hello_timeout = slot.conn.hello_timeout,
+            });
         }
         self.timers.set(index, null);
         // DEL before close, and generation validation before every batch event.

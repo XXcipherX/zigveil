@@ -97,12 +97,19 @@ Preserve FIN/reset semantics and classify only on failure. Stats retain a fixed
 buffer with a compile-time worst-case bound.
 
 `log.zig` is owned by main and borrowed by Server. Levels/formats come from config;
-SIGUSR2 changes only runtime verbosity in the serving loop. Periodic text activity
-uses interval deltas; warning/error groups use independent one-second deltas.
-Idle intervals and zero event fields stay quiet. JSON stats retain every counter.
-SIGUSR1 explicitly requests totals even at none. debug lifecycle metadata is emitted
-only at phase transitions and close, never per packet. A fatal connection result
-is retained by value for that close record; it does not add successful-I/O work.
+SIGUSR2 changes only runtime verbosity in the serving loop. Periodic text INFO shows
+cumulative up/down totals and rates from wrapping byte deltas over actual monotonic
+elapsed time. Suppress unchanged traffic/active gauges, even with idle connections.
+JSON stats retain every original counter. Warning/error events enter fixed batches
+on cold failure paths; emit at most one line per severity per second. Counts cover
+the batch and `last:` labels only its most recent event's context. Hello/idle expiry
+and reset/pipe outcomes stay in diagnostics/debug; connect/prefix expiry and actual
+admission/resource pressure warn. No arbitrary reset-count escalation.
+SIGUSR1 explicitly requests totals even at none. DEBUG emits one close record with
+lifetime, configured route and final phase/reason, never per packet or every phase.
+Acceptance time and config-owned route pointers are lifecycle metadata; the loop's
+existing timestamp supplies close lifetime. Fatal connect/I/O errno is retained by
+value for that close record without another probe or successful-I/O work.
 All formatting is bounded and occurs after filtering; stderr writes may block.
 
 ## Resource and time model

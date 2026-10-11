@@ -80,8 +80,12 @@ pub const Config = struct {
     }
 
     pub fn lookup(self: *const Config, name: ?*const Name) ?Address {
-        if (name) |value| for (self.routes) |route| {
-            if (route.name.eql(value)) return route.backend;
+        return if (self.lookupRoute(name)) |route| route.backend else null;
+    }
+
+    pub fn lookupRoute(self: *const Config, name: ?*const Name) ?*const Route {
+        if (name) |value| for (self.routes) |*route| {
+            if (route.name.eql(value)) return route;
         };
         return null;
     }

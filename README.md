@@ -140,7 +140,7 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `hello_timeout_ms` | `5000` | Absolute pre-routing deadline; range 250..60000 |
 | `connect_timeout_ms` | `5000` | Separate absolute connect and prefix-send deadlines |
 | `idle_timeout_ms` | `300000` | Successful-I/O idle deadline; `0` disables it |
-| `stats_interval_ms` | `30000` | Activity summary interval; `0` disables summaries, while live warnings remain enabled |
+| `stats_interval_ms` | `30000` | Traffic summary interval; `0` disables summaries, while live warnings remain enabled |
 | `log_level` | `"info"` | `error`, `warn`, `info`, `debug` or `none` |
 | `log_format` | `"text"` | Readable `text` or machine-readable `json` |
 | `reuse_port` | `false` | Allow independently launched processes to share the listener |
@@ -353,26 +353,44 @@ and aligned severity labels. Set these optional JSON keys:
 | Level | Output |
 | --- | --- |
 | `error` | Fatal service errors, unexpected socket errno and zero-byte nonempty writes |
-| `warn` | Errors plus connection failures, deadlines, rejected admissions, accept failures, malformed hellos and other network failures |
-| `info` | Warnings/errors, startup/shutdown and compact activity summaries |
-| `debug` | Info plus connection phase/close events with an ID, reason and exact socket side/operation/errno on fatal I/O |
+| `warn` | Errors plus backend connect failures, connect/prefix deadlines, admission/resource pressure, metadata rejection and other network failures |
+| `info` | Warnings/errors, startup/shutdown and compact traffic summaries |
+| `debug` | Info plus one final record per admitted connection: ID, lifetime, configured route, final phase/reason and exact socket side/operation/errno |
 | `none` | No automatic daemon output |
 
-Periodic text summaries show the current active count and changes since the previous
-summary. Byte volumes use B/KiB/MiB/GiB; zero event fields are omitted. An idle process
-does not repeat empty summaries. For example:
+Periodic text summaries show active connections, average forwarding rates and
+cumulative traffic since this process started. `up` means client → backend;
+`down` means backend → client, summed across all connections. Totals count successful
+forwarded bytes, including the original hello and excluding a generated PROXY header.
+Rates use the actual elapsed monotonic time, shown in `avg(...)`; the default interval
+is 30 seconds. Units use B/KiB/MiB/GiB and two decimal places for scaled totals and
+rates. A restart resets totals. Unchanged traffic and active counts produce no
+repeated text summary, including when established connections remain idle. For example:
 
 ```text
-2026-10-02T12:00:00Z INFO  activity; active=0 accepted=330 routed=329 closed=330 sent=187.4MiB received=724.1MiB connection_resets=66 broken_pipes=6 unknown_sni=1
-2026-10-02T12:00:01Z WARN  failures connect_failures=2
+2026-10-11T13:17:27Z INFO  stats | active=59 | avg(30s): up=30.84KiB/s down=1.05MiB/s | total: up=148.24MiB down=12.43GiB
+2026-10-11T13:17:28Z WARN  warnings | connect_failures=2 | last: cause=connect_failures phase=connect backend=192.0.2.10:443 errno=111(CONNREFUSED)
 ```
 
-New warning/error counts are combined into at most one message per severity per
-second, independently of the summary interval. Shutdown flushes pending counts.
-Resets and broken pipes appear in info summaries and debug close details; they
-still close the affected stream and remain in `io_errors`. Their log severity does
-not establish which application caused them. Ordinary FIN has no warning. debug
-logs contain lifecycle metadata, never payloads, ClientHello contents or client IPs.
+Warning/error counts are combined into at most one message per severity per second,
+independently of the summary interval. Counts cover the whole batch; `last:` identifies
+only its most recent event, with the phase, selected backend and errno where available.
+Shutdown and level changes flush pending counts. Connect and unsent-prefix timeouts
+warn separately. Hello and ordinary idle timeouts, malformed/unknown names, resets
+and broken pipes remain available in diagnostic totals and DEBUG close records;
+they produce no routine WARN or INFO failure fields. They still close the affected
+stream when fatal and remain in their original counters. Their severity does not
+establish which application caused them. Ordinary FIN has no warning.
+
+DEBUG emits one close record instead of repeating hello/connect/relay transitions.
+It shows the configured route (or `fallback`/`unselected`), lifetime and final phase:
+`hello`, `connect`, `prefix`, `relay` or idle timeout `idle`. A partial hello that
+expired before selecting fallback adds `hello_timeout=true`. Logs contain lifecycle
+metadata, never payloads, ClientHello contents or client IPs.
+
+```text
+2026-10-11T13:17:29Z DEBUG connection id=3145732 | closed | duration=42.315s | route=example.com | reason=io_error phase=relay backend=192.0.2.10:443 side=backend operation=socket_error errno=32(PIPE)
+```
 
 `SIGUSR1` explicitly requests cumulative totals. Text groups related counters and
 omits zeros; `json` emits the complete original `event: stats` object, including zero

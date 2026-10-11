@@ -32,9 +32,11 @@ Read the relevant project guides before changing behavior:
 10. Keep docs/config/test expectations aligned with implemented behavior.
 11. Preserve exact Linux errno by value. Count fatal I/O once, with one actual
     socket side/operation and one cause; keep accept/connect/deadline errors separate.
-12. Filter logs before formatting. Default output is compact text; debug lifecycle
-    details contain no payloads or client IPs. Preserve grouped warning rate limits,
-    idle suppression, explicit snapshots and the complete JSON counter schema.
+12. Filter logs before formatting. Text INFO shows cumulative traffic and rates over
+    actual monotonic elapsed time; DEBUG emits one close record with lifetime and
+    configured route. No payloads or client IPs. Preserve grouped warning rate limits,
+    hello/idle versus connect/prefix severity, idle suppression, explicit snapshots
+    and the complete unchanged JSON counter schema.
 13. Io owns two shared pipes, never a slot. A pump returns its borrow empty on
     every exit; deferred live bytes belong to that connection's fixed ring.
 14. Dataplane diagnostics remain compile-time optional with zero production

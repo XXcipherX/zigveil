@@ -649,29 +649,46 @@ class Integration(unittest.TestCase):
             self.assertEqual(baseline, len(os.listdir(f"/proc/{proxy.process.pid}/fd")))
             self.assert_io_dimensions(proxy.snapshot())
 
-    def test_text_logs_show_compact_activity_and_explicit_totals(self):
+    def test_text_logs_show_rates_cumulative_traffic_and_explicit_totals(self):
         with Origin() as origin, Daemon(origin.address, log_format=None, stats_interval_ms=1000) as proxy:
             wire = hello() + bytes(range(256)) * 8
             with proxy.connect() as client:
                 client.sendall(wire)
                 client.shutdown(socket.SHUT_WR)
                 self.assertEqual(wire, all_bytes(client))
-            proxy.wait_for(lambda: "accepted=1" in proxy.logs() and "received=2." in proxy.logs())
+            proxy.wait_for(lambda: "stats | active=0 | avg(" in proxy.logs())
             logs = proxy.logs()
-            self.assertRegex(logs, r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ INFO  activity; active=0 accepted=1 routed=1 closed=1 sent=2\.\dKiB received=2\.\dKiB")
+            self.assertRegex(logs, r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ INFO  stats \| active=0 \| avg\([\d.]+s\): up=[\d.]+[KMGTPE]?i?B/s down=[\d.]+[KMGTPE]?i?B/s \| total: up=2\.\d\dKiB down=2\.\d\dKiB")
+            self.assertNotIn("accepted=", logs)
+            self.assertNotIn("routed=", logs)
+            self.assertNotIn("closed=", logs)
             self.assertNotIn('{"event"', logs)
             self.assertNotIn("DEBUG", logs)
             self.assertNotIn("io_errors=0", logs)
             old = len(logs)
             old_diagnostics = len([e for e in proxy.events() if e.get("event") == "dataplane"])
             proxy.process.send_signal(signal.SIGUSR1)
-            proxy.wait_for(lambda: "traffic sent=" in proxy.logs()[old:] and
+            proxy.wait_for(lambda: "traffic | total: up=" in proxy.logs()[old:] and
                            (not DIAGNOSTICS or len([e for e in proxy.events() if e.get("event") == "dataplane"]) > old_diagnostics))
             self.assertIn("totals active=0 accepted=1 routed=1 closed=1", proxy.logs()[old:])
             # Idle timer ticks must not repeat the same totals or status line.
             stable = proxy.logs()
             time.sleep(1.3)
             self.assertEqual(stable, proxy.logs())
+            # An established idle connection also stays quiet between changes.
+            with proxy.connect() as client:
+                client.sendall(wire)
+                self.assertEqual(wire, exact(client, len(wire)))
+                hundredths = 2 * len(wire) * 100 // 1024
+                total = f"{hundredths // 100}.{hundredths % 100:02d}KiB"
+                proxy.wait_for(lambda: any("stats | active=1 | avg(" in line and
+                                          f"total: up={total} down={total}\n" in line
+                                          for line in proxy.logs()[len(stable):].splitlines(keepends=True)))
+                live = proxy.logs()
+                time.sleep(1.3)
+                self.assertEqual(live, proxy.logs())
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(b"", all_bytes(client))
 
     def test_live_warning_batches_and_level_filters(self):
         backend = f"127.0.0.1:{free_port()}"
@@ -682,11 +699,12 @@ class Integration(unittest.TestCase):
                         client.sendall(hello())
                         self.assert_closed(client)
                 if level in ("info", "warn"):
-                    proxy.wait_for(lambda: "WARN  failures connect_failures=5" in proxy.logs())
+                    proxy.wait_for(lambda: "WARN  warnings | connect_failures=5" in proxy.logs())
                     stable = proxy.logs()
+                    self.assertIn(f"last: cause=connect_failures phase=connect backend={backend} errno=111(CONNREFUSED)", stable)
                     time.sleep(1.1)
                     self.assertEqual(stable, proxy.logs())
-                    self.assertEqual(1, stable.count("WARN  failures"))
+                    self.assertEqual(1, stable.count("WARN  warnings |"))
                 else:
                     time.sleep(1.3)
                     self.assertEqual("", proxy.logs())
@@ -719,6 +737,45 @@ class Integration(unittest.TestCase):
             proxy.process.wait(timeout=5)
             self.assertNotIn('"event":"stopped"', proxy.logs())
 
+    def test_hello_and_idle_deadlines_are_quiet_but_remain_in_diagnostics(self):
+        for level in ("info", "debug"):
+            with self.subTest(level=level), Origin() as origin, Daemon(
+                    origin.address, log_level=level, hello_timeout_ms=250, idle_timeout_ms=250) as proxy:
+                with proxy.connect() as client:
+                    self.assert_closed(client)
+                with proxy.connect() as client:
+                    wire = hello()
+                    client.sendall(wire)
+                    self.assertEqual(wire, exact(client, len(wire)))
+                    self.assert_closed(client)
+                counts = proxy.snapshot()
+                self.assertEqual(2, counts["timeouts"])
+                self.assert_io_dimensions(counts, 0)
+                events = proxy.events()
+                self.assertFalse(any(event.get("level") in ("warn", "error") for event in events))
+                closed = [event for event in events if event.get("event") == "connection_closed"]
+                self.assertEqual(2 if level == "debug" else 0, len(closed))
+                if closed:
+                    self.assertIn("reason=timeout phase=hello", closed[0]["message"])
+                    self.assertIn("route=example.com | reason=timeout phase=idle", closed[1]["message"])
+                    for event in closed:
+                        self.assertRegex(event["message"], r"duration=[\d.]+s")
+                self.assertFalse(any(event.get("event") == "connection" for event in events))
+
+    def test_admission_warning_identifies_the_exhausted_pool(self):
+        for capacity, cause in ((1, "connection_capacity"), (2, "handshake_capacity")):
+            with self.subTest(cause=cause), Origin() as origin, Daemon(
+                    origin.address, max_connections=capacity, max_handshakes=1) as proxy:
+                with proxy.connect():
+                    proxy.wait_for(lambda: proxy.snapshot()["active"] == 1)
+                    with proxy.connect() as rejected:
+                        self.assert_closed(rejected)
+                    proxy.wait_for(lambda: any(event.get("event") == "failures" for event in proxy.events()))
+                    warnings = [event for event in proxy.events() if event.get("event") == "failures"]
+                    self.assertEqual(1, len(warnings))
+                    self.assertIn(f"{cause}=1 | last: cause={cause} phase=accept", warnings[0]["message"])
+                    self.assertEqual(1, proxy.snapshot()["rejected"])
+
     def test_debug_reset_details_do_not_change_accounting_or_log_payload(self):
         with Origin() as origin, Daemon(origin.address, log_level="debug") as proxy:
             wire = hello() + b"PRIVATE-PAYLOAD-MUST-NOT-APPEAR-IN-LOGS"
@@ -733,7 +790,9 @@ class Integration(unittest.TestCase):
             closed = [event for event in events if event["event"] == "connection_closed"]
             self.assertEqual(1, len(closed))
             self.assertEqual("debug", closed[0]["level"])
+            self.assertRegex(closed[0]["message"], r"duration=[\d.]+s \| route=example.com \| reason=io_error phase=relay")
             self.assertIn("side=client operation=socket_error errno=104", closed[0]["message"])
+            self.assertFalse(any(event.get("event") == "connection" for event in events))
             self.assertNotIn("PRIVATE-PAYLOAD", proxy.logs())
             self.assertNotIn('"level":"warn"', proxy.logs())
             counts = proxy.snapshot()

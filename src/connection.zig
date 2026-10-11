@@ -9,6 +9,7 @@ const outcome = @import("io_result.zig");
 const metrics = @import("metrics.zig");
 const relay_pipe = @import("relay_pipe.zig");
 const proxy_protocol = @import("proxy_protocol.zig");
+const logging = @import("log.zig");
 pub const relay_byte_budget = 262144;
 const relay_call_budget = 128;
 const bulk_read_bytes = 16384;
@@ -43,6 +44,12 @@ pub const Connection = struct {
     backend: i32 = -1,
     state: State = .hello,
     reason: CloseReason = .complete,
+    closed_phase: logging.Phase = .hello,
+    accepted_ms: u64,
+    route: ?*const config_mod.Route = null,
+    fallback: bool = false,
+    hello_timeout: bool = false,
+    connect_errno: ?outcome.Errno = null,
     io_failure: ?IoFailure = null,
     stage: ?[]u8,
     stage_len: usize = 0,
@@ -59,6 +66,7 @@ pub const Connection = struct {
     pub fn init(client: i32, stage: []u8, forward: []u8, reverse: []u8, now: u64) Connection {
         return .{
             .client = client,
+            .accepted_ms = now,
             .stage = stage,
             .to_backend = .{ .buffer = .{ .data = forward } },
             .to_client = .{ .buffer = .{ .data = reverse } },
@@ -68,8 +76,19 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection, reason: CloseReason) void {
+        if (self.state == .closed) return;
+        self.closed_phase = if (reason == .connect_failed) .connect else if (reason == .timeout and self.phase() == .relay) .idle else self.phase();
         self.reason = reason;
         self.state = .closed;
+    }
+
+    pub fn phase(self: *const Connection) logging.Phase {
+        return switch (self.state) {
+            .hello => .hello,
+            .connecting => .connect,
+            .relaying => if (self.stage != null) .prefix else .relay,
+            .closed => self.closed_phase,
+        };
     }
 
     pub fn deadline(self: *const Connection, limits: config_mod.Raw) ?u64 {
@@ -94,6 +113,7 @@ pub const Connection = struct {
                     self.checkSocketError(io, false, counts);
                     if (self.state == .closed) return;
                     counts.timeouts +%= 1;
+                    self.hello_timeout = true;
                     self.startBackend(io, config, endpoint, true, now, counts);
                     return;
                 }
@@ -120,11 +140,15 @@ pub const Connection = struct {
         if (self.state == .hello) self.inspect(io, config, now, counts);
         if (self.state == .connecting) {
             if (!backend_ready) return;
-            io.finishConnect(self.backend) catch {
-                counts.connect_failures +%= 1;
-                self.close(.connect_failed);
-                return;
-            };
+            switch (io.finishConnect(self.backend)) {
+                .ok => {},
+                .err => |err| {
+                    self.connect_errno = err;
+                    counts.connect_failures +%= 1;
+                    self.close(.connect_failed);
+                    return;
+                },
+            }
             self.state = .relaying;
             self.entered_ms = now;
             self.activity_ms = now;
@@ -196,7 +220,8 @@ pub const Connection = struct {
                 .invalid => break,
                 .ok => |maybe_name| {
                     const name = maybe_name;
-                    var destination = config.lookup(if (name) |*value| value else null);
+                    self.route = config.lookupRoute(if (name) |*value| value else null);
+                    var destination: ?config_mod.Address = if (self.route) |route| route.backend else null;
                     const fallback = destination == null;
                     if (destination == null) {
                         if (name == null) counts.missing_sni +%= 1 else counts.unknown_sni +%= 1;
@@ -221,6 +246,7 @@ pub const Connection = struct {
     }
 
     fn startBackend(self: *Connection, io: anytype, config: *const Config, endpoint: config_mod.Address, fallback: bool, now: u64, counts: *Counters) void {
+        self.fallback = fallback;
         counts.routed +%= 1;
         if (fallback) {
             counts.fallback_routed +%= 1;
@@ -246,10 +272,14 @@ pub const Connection = struct {
                 self.proxy_header_remaining = n;
             }
         }
-        const connecting = io.startConnect(endpoint) catch {
-            counts.connect_failures +%= 1;
-            self.close(.connect_failed);
-            return;
+        const connecting = switch (io.startConnect(endpoint)) {
+            .ok => |connecting| connecting,
+            .err => |err| {
+                self.connect_errno = err;
+                counts.connect_failures +%= 1;
+                self.close(.connect_failed);
+                return;
+            },
         };
         self.backend = connecting.fd;
         self.entered_ms = now;
