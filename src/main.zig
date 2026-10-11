@@ -26,7 +26,7 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
         return;
     }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        net.print("Usage: zigveil CONFIG.json\n       zigveil --check CONFIG.json\n       zigveil --help | --version\nSIGUSR1 prints totals; SIGUSR2 cycles info/debug/none/error/warn.\nSIGTERM/SIGINT drain for up to 30 seconds.\n", .{});
+        net.print("Usage: zigveil CONFIG.json\n       zigveil --check CONFIG.json\n       zigveil --help | --version\nSIGUSR1 prints totals; SIGUSR2 cycles info/debug/none/error/warn.\nSIGTERM/SIGINT close active connections and exit without draining.\n", .{});
         return;
     }
     const check = args.len == 3 and std.mem.eql(u8, args[1], "--check");

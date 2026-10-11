@@ -10,7 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-from integration import Origin, all_bytes, free_port, hello
+from integration import Origin, all_bytes, exact, free_port, hello
 
 
 def command(*args, check=True):
@@ -61,6 +61,35 @@ def smoke(image):
                 client.sendall(payload)
                 client.shutdown(socket.SHUT_WR)
                 assert all_bytes(client) == payload
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                client.settimeout(5)
+                payload = hello() + os.urandom(256 * 1024)
+                client.sendall(payload)
+                assert exact(client, len(payload)) == payload
+                started = time.monotonic()
+                result = subprocess.run(["docker", "stop", "--timeout", "35", name],
+                                        capture_output=True, text=True, timeout=10)
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert time.monotonic() - started < 10
+                try:
+                    assert client.recv(1) == b"", "client socket remained open"
+                except ConnectionResetError:
+                    pass
+            assert command("docker", "inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
+            command("docker", "start", name)
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1) as client:
+                        client.settimeout(5)
+                        wire = hello()
+                        client.sendall(wire)
+                        assert exact(client, len(wire)) == wire
+                    break
+                except (ConnectionRefusedError, socket.timeout):
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("restarted container failed to listen")
+                    time.sleep(.1)
             command("docker", "stop", "--timeout", "35", name)
             assert command("docker", "inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
             assert path.read_bytes() == before

@@ -36,7 +36,7 @@ CONFIG_SOURCE or explicit SNI/BACKEND. Existing JSON is retained on updates. Pul
 Compose validation and an image-based --check finish before stopping/recreating
 the existing service. Never make an invalid config or failed pull disrupt it.
 Keep the installation-directory lock, stdin-only registry password handling,
-read-only mounts, fd limits and graceful-stop interval. The entrypoint must never activate example
+read-only mounts, fd limits and stop watchdog. The entrypoint must never activate example
 routes or create a config as a side effect of --check/help/version.
 Validate root ownership and write permissions of the directory and every parent
 before creating/opening installation files. Refuse nonregular/symlinked lock files
@@ -49,10 +49,12 @@ files or configure extra_hosts/dns when host-specific resolution is required. Th
 generated zigveil.service controls Compose and can replace the native unit after
 preflight. Test install/update behavior on an ephemeral systemd host, including
 config preservation and a failing preflight that leaves the running container intact.
-Compose reload recreates the container. It permits an interruption of new accepts
-while the old process drains (up to 30 seconds) and the replacement starts. Existing
-connections that outlive the drain deadline close. Preserve this simple update
-contract and describe the interruption when changing deployment instructions.
+Compose reload recreates the container. SIGTERM closes its listener and active
+connections immediately through ordinary cleanup, then the replacement starts
+on the released port. New accepts pause until readiness and existing clients must
+reconnect; no zero-downtime guarantee exists. Preserve stop_grace_period=35s and
+systemd stop timeouts as emergency watchdogs, not mandatory waits or substitutes
+for signal-driven cleanup. Preserve this simple update contract.
 Readiness inspects a LISTEN socket owned by the container PID, so warn/error/none
 verbosity works too. Do not restore a startup-log dependency. --check is an explicit
 diagnostic and reports failure even when automatic daemon logs are disabled.

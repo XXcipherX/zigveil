@@ -257,9 +257,9 @@ class Daemon:
                 try:
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    self.process.send_signal(signal.SIGTERM)
+                    self.process.kill()
                     self.process.wait(timeout=2)
-                    raise AssertionError(f"graceful drain stalled: {self.logs()}")
+                    raise AssertionError(f"shutdown stalled: {self.logs()}")
             if self.process.returncode != 0:
                 raise AssertionError(self.logs())
         finally:
@@ -283,6 +283,77 @@ class Integration(unittest.TestCase):
             self.assertEqual(b"", sock.recv(1))
         except ConnectionResetError:
             pass
+
+    def test_sigterm_without_connections_exits_and_releases_port(self):
+        with Origin() as origin, Daemon(origin.address) as proxy:
+            port = proxy.port
+            proxy.process.send_signal(signal.SIGTERM)
+            self.assertEqual(0, proxy.process.wait(timeout=5), proxy.logs())
+            events = proxy.events()
+            self.assertEqual(1, sum(event.get("event") == "stopping" for event in events))
+            self.assertEqual(1, sum(event.get("event") == "stopped" for event in events))
+            counts = [event for event in events if event.get("event") == "stats"][-1]
+            self.assertEqual(0, counts["active"])
+            self.assertEqual(0, counts["accepted"])
+            self.assertEqual(0, counts["closed"])
+            with Daemon(origin.address, listen=f"127.0.0.1:{port}") as replacement:
+                with replacement.connect() as client:
+                    wire = hello()
+                    client.sendall(wire)
+                    self.assertEqual(wire, exact(client, len(wire)))
+
+    def test_stop_signals_close_live_hello_and_relay_connections(self):
+        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=stop_signal):
+                backend_closed = threading.Event()
+                payload = hello() + os.urandom(256 * 1024)
+                def held_backend(sock):
+                    # No peer sends FIN before the signal. EOF/reset must come
+                    # from proxy shutdown, while the long-lived carrier is idle.
+                    self.assertEqual(payload, exact(sock, len(payload)))
+                    sock.sendall(payload)
+                    self.assert_closed(sock)
+                    backend_closed.set()
+                with Origin(held_backend) as origin, Daemon(
+                        origin.address, log_level="debug", hello_timeout_ms=60000,
+                        idle_timeout_ms=0) as proxy:
+                    port = proxy.port
+                    with proxy.connect() as pending, proxy.connect() as relay:
+                        relay.sendall(payload)
+                        self.assertEqual(payload, exact(relay, len(payload)))
+                        before = proxy.snapshot()
+                        self.assertEqual(2, before["active"])
+                        self.assertEqual(2, before["accepted"])
+                        self.assertEqual(1, before["routed"])
+                        # Five seconds tolerates runner scheduling but rejects
+                        # the former 30-second drain. The success path has no sleep.
+                        proxy.process.send_signal(stop_signal)
+                        self.assertEqual(0, proxy.process.wait(timeout=5), proxy.logs())
+                        self.assert_closed(pending)
+                        self.assert_closed(relay)
+                        self.assertTrue(backend_closed.wait(timeout=5), "backend socket remained open")
+                        events = proxy.events()
+                        self.assertEqual(1, sum(event.get("event") == "stopping" for event in events))
+                        self.assertEqual(1, sum(event.get("event") == "stopped" for event in events))
+                        closed = [event for event in events if event.get("event") == "connection_closed"]
+                        self.assertEqual(2, len(closed))
+                        for phase in ("hello", "relay"):
+                            self.assertTrue(any(f"reason=stopping phase={phase}" in event["message"]
+                                                for event in closed), closed)
+                        final = [event for event in events if event.get("event") == "stats"][-1]
+                        self.assertEqual(0, final["active"])
+                        self.assertEqual(2, final["closed"])
+                        self.assertEqual(before["accepted"], final["accepted"])
+                        self.assertEqual(before["routed"], final["routed"])
+                        for field in ("bytes_client_to_backend", "bytes_backend_to_client", "timeouts"):
+                            self.assertEqual(before[field], final[field])
+                        self.assert_io_dimensions(final, 0)
+                    # Rebind while the old process has exited, then use the same
+                    # listener for another real byte-preserving connection.
+                    with Daemon(origin.address, listen=f"127.0.0.1:{port}") as replacement:
+                        with replacement.connect() as client:
+                            client.sendall(payload)
+                            self.assertEqual(payload, exact(client, len(payload)))
 
     def test_byte_preservation_fragmentation_and_large_pq_shaped_prefix(self):
         with Origin() as origin, Daemon(origin.address) as proxy:

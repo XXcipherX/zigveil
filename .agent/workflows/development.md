@@ -52,6 +52,11 @@ their last-event context, bounded escaping/units and unchanged JSON counters.
 Cover hello/idle versus connect/prefix severity and one DEBUG close with lifetime,
 config-owned route and exact errno through actual sockets and artificial I/O.
 Keep daemon readiness independent of log verbosity.
+Shutdown changes cover SIGTERM/SIGINT with live connections and an empty listener,
+repeated signals, all four connection phases, timer/pool/fd cleanup, retained
+forwarded-byte counters/final logs and reuse of the listener port. Check shared
+pipe ownership and buffered builds. Use broad bounded exit waits that detect a
+drain-window regression without millisecond timing or sleeps on the success path.
 DNS changes preserve bounded startup/check completion with a silent resolver and
 continuous malformed or duplicate replies. Deterministic ready-I/O tests cover
 retry deadlines, the overall limit and socket cleanup without wall-clock timing.

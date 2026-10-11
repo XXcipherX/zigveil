@@ -46,6 +46,11 @@ Read the relevant project guides before changing behavior:
     select it; empty input, fatal transport errors and capacity failures cannot.
     A selected backend's failure never retries a second destination. PPv2 metadata
     comes only from that accepted socket, never client-supplied metadata or guesses.
+16. SIGTERM/SIGINT close the listener once and leave dispatch for ordinary slot
+    teardown immediately. Do not drain active sessions or replay cached events.
+    Cancel timers and return staging/slots before final totals; Io alone closes
+    shared pipes in Server.deinit. Repeated stop signals are idempotent. Deployment
+    stop timeouts are watchdog limits, never a mandatory delay.
 
 ## Change discipline
 

@@ -326,13 +326,28 @@ against socket/signal handling. These are algorithmic costs, not measured speedu
 Timer nodes and indices add 20 bytes per capacity slot on the supported 64-bit targets.
 
 SIGINT/TERM/USR1/USR2 are blocked and consumed through signalfd in the owning loop.
-Shutdown stops accepts and drains for 30 seconds; the next signal requests an
-immediate stop. SIGUSR1 requests totals, while SIGUSR2 cycles runtime verbosity.
+The first SIGINT/SIGTERM sets the stop deadline to the current time, removes the
+listener registration and closes the listener once. After consuming the signal
+batch, run leaves event dispatch immediately, without processing further socket
+events or timers. The existing drop path marks live slots as stopping, cancels
+their timers, removes both socket registrations, closes both fds and returns their
+staging/connection reservations. Each close decrements active and increments closed
+once; shutdown does not fabricate I/O errors or forwarded bytes. Unsent prefix/ring
+bytes may be discarded. Repeat stop signals leave the stop request unchanged.
+Pumps have already returned every shared-pipe borrow before signalfd is handled.
+Server.deinit therefore owns pipe closure, signalfd/epoll closure, signal-state
+restoration, pool/timer storage and both buffer slabs; it finds no live slots after
+a normal run exit. SIGUSR1 requests totals, while SIGUSR2 cycles runtime verbosity.
 Diagnostics use fixed-buffer stderr writes and need a functioning sink.
+Enabled pending failure batches and final totals are logged after connection
+cleanup. No connection-drain wait, shutdown configuration or extra owner is added.
 There is no packet logging or HTTP admin server.
 The Compose installer updates by recreating its container. New accepts pause
-through the old process's drain and replacement startup; existing streams that
-outlive the 30-second drain deadline close. This deployment permits that pause.
+through shutdown and replacement startup, and existing streams are interrupted.
+SO_REUSEADDR permits the replacement to bind the released listener port. There is
+no zero-downtime guarantee. Compose stop_grace_period=35s, native systemd's 35s
+stop timeout and the Compose wrapper's 45s timeout remain emergency watchdogs;
+they do not impose a minimum wait when the daemon exits earlier.
 
 ## Socket error observability
 

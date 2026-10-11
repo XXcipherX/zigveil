@@ -131,7 +131,7 @@ pub const Server = struct {
         self.now_ms = now;
         self.log.begin(now, &self.counts);
         var stats = now + self.config.raw.value.stats_interval_ms;
-        while (true) {
+        serving: while (true) {
             if (self.stop_deadline_ms) |deadline| {
                 if (self.counts.active == 0 or now >= deadline) break;
             }
@@ -160,6 +160,7 @@ pub const Server = struct {
                 if (token == 1) {
                     self.io.metrics.add("signal_events", 1);
                     try self.signal(now);
+                    if (self.stop_deadline_ms != null) break :serving;
                     continue;
                 }
                 const index = self.pool.resolve(token) orelse {
@@ -367,12 +368,9 @@ pub const Server = struct {
                 }
             } else if (info.signo == @backingInt(linux.SIG.USR2)) {
                 self.log.cycle(now, &self.counts);
-            } else if (self.stop_deadline_ms != null) {
-                self.log.message(.warn, "stopping", "forcing shutdown; active={d}", .{self.counts.active});
+            } else if (self.stop_deadline_ms == null) {
+                self.log.message(.info, "stopping", "closing active connections; active={d}", .{self.counts.active});
                 self.stop_deadline_ms = now;
-            } else {
-                self.log.message(.info, "stopping", "draining; active={d}; deadline=30s", .{self.counts.active});
-                self.stop_deadline_ms = now + 30000;
                 if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0, &self.io.metrics);
                 self.listener_registered = false;
                 net.close(self.listener);
@@ -392,4 +390,113 @@ fn control(epoll: i32, operation: u32, fd: i32, mask: u32, token: u64, diagnosti
     }
     var event: linux.epoll_event = .{ .events = mask, .data = .{ .u64 = token } };
     if (linux.errno(linux.epoll_ctl(epoll, operation, fd, if (operation == linux.EPOLL.CTL_DEL) null else &event)) != .SUCCESS) return error.EpollControlFailed;
+}
+
+test "stop signals close the listener once and release every connection phase" {
+    var config = try Config.parse(std.testing.allocator,
+        \\{"listen":"127.0.0.1:9443","routes":[{"sni":"example.com","backend":"127.0.0.1:9444"}],
+        \\ "max_connections":4,"max_handshakes":4,"relay_buffer_bytes":4096,"stats_interval_ms":0}
+    );
+    defer config.deinit(std.testing.allocator);
+    // The fixture binds an ephemeral port without changing public config validation.
+    config.listen.ip4.port = 0;
+    var log: logging.Logger = .{ .level = .none };
+    var server = try Server.init(std.testing.allocator, &config, &log);
+    var live = true;
+    defer if (live) server.deinit();
+    const server_fds = [_]i32{ server.listener, server.signals, server.epoll };
+    var clients: [4]i32 = @splat(-1);
+    var backends: [4]i32 = @splat(-1);
+    var peers: [8]i32 = @splat(-1);
+    defer for (peers) |fd| net.close(fd);
+    var tokens: [4]u64 = undefined;
+    const phases = [_]logging.Phase{ .hello, .connect, .prefix, .relay };
+    for (phases, 0..) |phase, at| {
+        var pair: [2]i32 = undefined;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0, &pair)));
+        clients[at] = pair[0];
+        peers[at * 2] = pair[1];
+        const index = server.pool.acquire().?;
+        const staging = server.stages.acquire().?;
+        const start = at * 8192;
+        const slot = &server.slots[index];
+        slot.* = .{
+            .conn = Connection.init(pair[0], server.stage_slab[at * 65536 ..][0..65536], server.relay_slab[start..][0..4096], server.relay_slab[start + 4096 ..][0..4096], 0),
+            .staging = staging,
+        };
+        server.counts.accepted += 1;
+        server.counts.active += 1;
+        if (phase != .hello) {
+            try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0, &pair)));
+            backends[at] = pair[0];
+            peers[at * 2 + 1] = pair[1];
+            slot.conn.backend = pair[0];
+            slot.conn.route = &config.routes[0];
+            slot.conn.state = if (phase == .connect) .connecting else .relaying;
+            server.counts.routed += 1;
+            slot.conn.stage_len = 2;
+            slot.conn.stage_sent = 1;
+        }
+        if (phase == .relay) {
+            slot.conn.stage = null;
+            // Queued bytes must not be flushed or counted as forwarded at shutdown.
+            slot.conn.to_backend.buffer.len = 1;
+            slot.conn.to_client.buffer.len = 1;
+        }
+        try server.reconcile(index);
+        tokens[at] = server.pool.token(index, false);
+    }
+    var pipe_fds: [4]i32 = @splat(-1);
+    if (relay_pipe.enabled) {
+        const pipes = server.io.openRelayPipes(4096) orelse return error.TestExpectedSharedPipes;
+        for (pipes, 0..) |pipe, at| @memcpy(pipe_fds[at * 2 ..][0..2], &pipe.fds);
+    }
+    // Also cover a listener disarmed by accept backoff; integration covers the
+    // ordinary registered listener through the real event loop.
+    try control(server.epoll, linux.EPOLL.CTL_DEL, server.listener, 0, 0, &server.io.metrics);
+    server.listener_registered = false;
+    server.accept_resume_ms = std.math.maxInt(u64);
+    const stop_now = try net.nowMs();
+    // Target the blocked serving thread even if the test runner owns other threads.
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.tgkill(linux.getpid(), linux.gettid(), .TERM)));
+    try server.signal(stop_now);
+    try std.testing.expectEqual(@as(?u64, stop_now), server.stop_deadline_ms);
+    try std.testing.expectEqual(@as(i32, -1), server.listener);
+    try std.testing.expect(!server.listener_registered);
+    try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(server_fds[0], linux.F.GETFD, 0)));
+    // Repeated termination signals leave listener ownership and the stop request intact.
+    for ([_]linux.SIG{ .TERM, .INT }) |sig| {
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.tgkill(linux.getpid(), linux.gettid(), sig)));
+        try server.signal(stop_now + 1);
+        try std.testing.expectEqual(@as(?u64, stop_now), server.stop_deadline_ms);
+    }
+    if (metrics.enabled) try std.testing.expectEqual(@as(u64, 1), server.io.metrics.get("close"));
+    try server.run();
+    try std.testing.expectEqual(@as(u64, 0), server.counts.active);
+    try std.testing.expectEqual(@as(u64, 4), server.counts.closed);
+    try std.testing.expectEqual(@as(u64, 0), server.counts.io_errors);
+    try std.testing.expectEqual(@as(u64, 0), server.counts.timeouts);
+    try std.testing.expectEqual(@as(u64, 0), server.counts.bytes_client_to_backend);
+    try std.testing.expectEqual(@as(u64, 0), server.counts.bytes_backend_to_client);
+    try std.testing.expectEqual(@as(usize, 0), server.timers.len);
+    for (server.pool.entries, phases, tokens, clients, backends) |entry, phase, token, client, backend| {
+        try std.testing.expect(!entry.used);
+        try std.testing.expect(server.pool.resolve(token) == null);
+        const index: u32 = @intCast((token >> 1) & 0xffff);
+        try std.testing.expectEqual(.stopping, server.slots[index].conn.reason);
+        try std.testing.expectEqual(phase, server.slots[index].conn.closed_phase);
+        try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(client, linux.F.GETFD, 0)));
+        if (backend >= 0) try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(backend, linux.F.GETFD, 0)));
+    }
+    for (server.stages.entries) |entry| try std.testing.expect(!entry.used);
+    for (pipe_fds) |fd| if (fd >= 0) try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)));
+    if (metrics.enabled) try std.testing.expectEqual(@as(u64, 8), server.io.metrics.get("close"));
+    server.deinit();
+    live = false;
+    for (server_fds) |fd| try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)));
+    for (pipe_fds) |fd| if (fd >= 0) try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)));
+    if (metrics.enabled and relay_pipe.enabled) {
+        try std.testing.expectEqual(@as(u64, 0), server.io.metrics.get("pipe_live"));
+        try std.testing.expectEqual(@as(u64, 12), server.io.metrics.get("close"));
+    }
 }

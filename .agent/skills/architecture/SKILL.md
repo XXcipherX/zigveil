@@ -112,6 +112,17 @@ existing timestamp supplies close lifetime. Fatal connect/I/O errno is retained 
 value for that close record without another probe or successful-I/O work.
 All formatting is bounded and occurs after filtering; stderr writes may block.
 
+SIGTERM/SIGINT set an immediate stop request, unregister/close the listener once
+and leave event dispatch after the signal batch. Do not drive further cached
+socket events or expiry work. Existing drop handles hello/connect/prefix/relay:
+cancel the timer, DEL registered socket roles, close both fds, return staging and
+release the slot, updating active/closed once. Queued userspace bytes may be
+discarded; stopping does not count as an I/O error. Final enabled logs follow drop.
+Every pump has already returned its borrow, so shared pipes remain Io-owned until
+Server.deinit closes them alongside signalfd/epoll and frees pools/slabs. Repeated
+stop signals must not close the listener again. There is no session drain window;
+Docker/systemd timeouts are emergency limits.
+
 ## Resource and time model
 
 Buffer capacity = `connections × 2 × ring_bytes + handshakes × (65536 + headroom)`.

@@ -1,6 +1,6 @@
 # Verification
 
-`zig build test` imports parser, name, config, buffer, pool, timers, connection and
+`zig build test` imports parser, name, config, buffer, pool, timers, connection, server and
 Linux syscall-boundary tests.
 The artificial socket implementation drives **the production Connection engine**;
 it substitutes recv/send/connect/shutdown operations, not state transitions.
@@ -9,6 +9,7 @@ it substitutes recv/send/connect/shutdown operations, not state transitions.
 | --- | --- |
 | Complete/partial ClientHello | Every TCP prefix, single-byte deliveries, split record headers/fields |
 | Record fragmentation | Multi-record valid input, split SNI, excessive record count |
+| Process shutdown | Real signalfd stop requests and repeated SIGTERM/SIGINT; listener closes once; hello/connect/prefix/relay slots cancel timers, release staging and invalidate tokens; both socket roles close and shared pipes remain Io-owned until deinit |
 | Input rejection | Record/handshake/vector lengths, duplicate SNI, malformed tail/name, over-limit input |
 | Bounds | Maximum 65536-byte wire prefix and larger hostile input |
 | Routing | Exact/unknown/missing names, default fallback for classifier failure and partial EOF/deadline; empty input, fatal errors and connect failure never reroute |
@@ -54,6 +55,15 @@ snapshots while muted, hello/idle expiry severity and one DEBUG close with lifet
 configured route and precise RST details without payload leakage or changed accounting.
 Invalid logging settings fail before bind. Readiness checks an owned socket without probe
 traffic and works independently of INFO output.
+
+Shutdown integration holds a silent hello and a live long-lived relay open until
+SIGTERM/SIGINT, then requires exit within five seconds, both peers to close, final
+active=0, consistent counters and DEBUG stopping records. Empty-listener SIGTERM
+and immediate reuse of the old port are checked separately. These tests run for
+both shared-splice and buffered binaries through the existing CI matrix. Native
+Docker smoke also stops an open relay through the PID 1 entrypoint with a generous
+ten-second bound, then restarts the container and forwards on the same port. The
+success path adds no shutdown sleep; watchdog limits remain unchanged.
 
 Controlled client and backend RST tests use zero SO_LINGER after an echoed prefix.
 The daemon is stopped temporarily with SIGSTOP while RST is queued, then resumed:

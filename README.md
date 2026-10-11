@@ -267,17 +267,18 @@ its `/etc/zigveil/config.json` is reused when no source was specified.
 | `GHCR_USER`, `GHCR_TOKEN` | unset | Optional registry login via password stdin |
 
 Compose uses host networking, a read-only root filesystem/config mount, only the
-bind-service capability, rotated logs and a 35-second graceful stop. Installing
+bind-service capability, rotated logs and a 35-second stop watchdog. Installing
 or updating in the same directory is serialized by a lock. The directory and its
 parents must be root-owned and not writable by other users; symlinked lock files
 are refused. Pull/preflight failure keeps the running service and deployment files
 intact. Re-run the installer to update the image:
 
-Updates recreate the container. New connections pause from the old listener's
-shutdown until the replacement is ready. Existing connections get up to 30
-seconds to drain; those still active at the deadline close. The pause can include
-that drain interval and the new process's startup time. Schedule updates when
-this interruption is acceptable.
+Updates recreate the container. SIGTERM closes the old listener and all active
+connections without waiting for them to finish. The process releases its resources
+and exits, then the replacement binds the same port. New connections pause until
+the replacement is ready; existing clients must reconnect. This is not a
+zero-downtime restart. The 35-second stop limit is an emergency watchdog, not a
+required delay. Schedule updates when this interruption is acceptable.
 
 ```sh
 sudo bash deploy/install_docker_compose.sh
@@ -489,9 +490,13 @@ Connection lifecycle details appear only at `debug`. Clean FIN and EAGAIN/EINTR 
 Reset and broken pipe are observed socket outcomes that remain fatal; the counters
 do not declare them either proxy defects or harmless application behavior.
 
-`SIGINT`/`SIGTERM`
-close the listener and allow up to 30 seconds of draining; a second signal forces
-remaining connections to close. Normal stderr delivery must remain available.
+`SIGINT`/`SIGTERM` close the listener and all active connections without a drain
+period. Teardown cancels timers, returns slots/staging, closes shared pipes and
+releases the server's descriptors and buffer slabs. Repeated stop signals do not
+repeat listener cleanup. Pending userspace bytes may be discarded; completed
+forwarded-byte counters remain intact and final logs follow the configured level.
+Normal stderr delivery must remain available. Docker/systemd stop timeouts are
+emergency limits and do not delay a process that exits earlier.
 
 ## Engineering documentation
 

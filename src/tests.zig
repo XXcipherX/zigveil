@@ -8,6 +8,7 @@ test {
     _ = @import("timers.zig");
     _ = @import("connection_test.zig");
     _ = @import("linux_io.zig");
+    _ = @import("server.zig");
     _ = @import("counters.zig");
     _ = @import("backend.zig");
     _ = @import("startup_dns.zig");
