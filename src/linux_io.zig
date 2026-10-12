@@ -384,6 +384,21 @@ pub fn checkFdLimit(max_connections: u32) !void {
     } else if (limit.cur < @as(u64, max_connections) * 2 + 8) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus8;
 }
 
+/// Threads share one descriptor table. Retain the old single-owner requirement.
+pub fn requiredFds(max_connections: u32, workers: u8) u64 {
+    const overhead: u64 = if (workers == 1)
+        (if (relay_pipe.enabled) @as(u64, 12) else 8)
+    else
+        @as(u64, workers) * (if (relay_pipe.enabled) @as(u64, 8) else 4) + 8;
+    return @as(u64, max_connections) * 2 + overhead;
+}
+
+pub fn checkWorkerFdLimit(max_connections: u32, workers: u8) !void {
+    if (workers == 1) return checkFdLimit(max_connections);
+    const limit = try std.posix.getrlimit(.NOFILE);
+    if (limit.cur < requiredFds(max_connections, workers)) return error.RaiseRLIMIT_NOFILEForAllWorkers;
+}
+
 pub fn print(comptime format: []const u8, args: anytype) void {
     var storage: [4096]u8 = undefined;
     const bytes = std.mem.print(&storage, format, args) catch return;

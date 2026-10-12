@@ -9,6 +9,8 @@ const Counters = @import("counters.zig").Counters;
 const logging = @import("log.zig");
 const metrics = @import("metrics.zig");
 const relay_pipe = @import("relay_pipe.zig");
+const Signals = @import("signals.zig").Signals;
+const workers = @import("worker_control.zig");
 const Slot = struct {
     conn: Connection = undefined,
     staging: ?u32 = null,
@@ -31,18 +33,27 @@ pub const Server = struct {
     epoll: i32,
     listener: i32,
     signals: i32,
-    previous_mask: linux.sigset_t,
-    previous_sigpipe: if (relay_pipe.enabled) linux.Sigaction else void,
+    signal_owner: ?Signals,
+    worker_control: ?*workers.Control = null,
     counts: Counters = .{},
     io: net.Io = .{},
     listener_registered: bool = true,
     accept_resume_ms: u64 = 0,
     stop_deadline_ms: ?u64 = null,
     now_ms: u64 = 0,
+    worker_heartbeat_ms: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger) !Server {
+        return initImpl(allocator, config, log, null);
+    }
+
+    pub fn initWorker(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger, mailbox: *workers.Control) !Server {
+        return initImpl(allocator, config, log, mailbox);
+    }
+
+    fn initImpl(allocator: std.mem.Allocator, config: *const Config, log: *logging.Logger, mailbox: ?*workers.Control) !Server {
         const raw = config.raw.value;
-        try net.checkFdLimit(raw.max_connections);
+        if (mailbox == null) try net.checkFdLimit(raw.max_connections);
         const slots = try allocator.alloc(Slot, raw.max_connections);
         errdefer allocator.free(slots);
         @memset(slots, .{});
@@ -60,30 +71,11 @@ pub const Server = struct {
         if (linux.errno(epoll_rc) != .SUCCESS) return error.EpollCreateFailed;
         const epoll: i32 = @intCast(epoll_rc);
         errdefer net.close(epoll);
-        var mask = linux.sigemptyset();
-        linux.sigaddset(&mask, .INT);
-        linux.sigaddset(&mask, .TERM);
-        linux.sigaddset(&mask, .USR1);
-        linux.sigaddset(&mask, .USR2);
-        var previous_mask: linux.sigset_t = undefined;
-        if (linux.errno(linux.sigprocmask(linux.SIG.BLOCK, &mask, &previous_mask)) != .SUCCESS) return error.SignalMaskFailed;
-        errdefer _ = linux.sigprocmask(linux.SIG.SETMASK, &previous_mask, null);
-        const signal_rc = linux.signalfd(-1, &mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
-        if (linux.errno(signal_rc) != .SUCCESS) return error.SignalFdFailed;
-        const signals: i32 = @intCast(signal_rc);
-        errdefer net.close(signals);
+        var signal_owner: ?Signals = if (mailbox == null) try Signals.init() else null;
+        errdefer if (signal_owner) |*owner| owner.deinit();
+        const signals: i32 = if (mailbox) |port| port.fd else signal_owner.?.fd;
         const listener = try net.listen(config.listen, raw.reuse_port);
         errdefer net.close(listener);
-        var previous_sigpipe: if (relay_pipe.enabled) linux.Sigaction else void = undefined;
-        if (relay_pipe.enabled) {
-            // splice lacks MSG_NOSIGNAL. EPIPE must remain an ordinary typed
-            // connection error, so ignore SIGPIPE for the serving lifetime.
-            const ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
-            if (linux.errno(linux.sigaction(.PIPE, &ignore, &previous_sigpipe)) != .SUCCESS) return error.SigpipeIgnoreFailed;
-        }
-        errdefer if (relay_pipe.enabled) {
-            _ = linux.sigaction(.PIPE, &previous_sigpipe, null);
-        };
         var io: net.Io = .{ .tcp_keepalive = raw.tcp_keepalive, .tcp_user_timeout_ms = raw.tcp_user_timeout_ms };
         try control(epoll, linux.EPOLL.CTL_ADD, listener, linux.EPOLL.IN, 0, &io.metrics);
         try control(epoll, linux.EPOLL.CTL_ADD, signals, linux.EPOLL.IN, 1, &io.metrics);
@@ -100,8 +92,8 @@ pub const Server = struct {
             .epoll = epoll,
             .listener = listener,
             .signals = signals,
-            .previous_mask = previous_mask,
-            .previous_sigpipe = previous_sigpipe,
+            .signal_owner = signal_owner,
+            .worker_control = mailbox,
             .io = io,
         };
     }
@@ -110,10 +102,8 @@ pub const Server = struct {
         for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
         self.io.deinit();
         net.close(self.listener);
-        net.close(self.signals);
         net.close(self.epoll);
-        if (relay_pipe.enabled) _ = linux.sigaction(.PIPE, &self.previous_sigpipe, null);
-        _ = linux.sigprocmask(linux.SIG.SETMASK, &self.previous_mask, null);
+        if (self.signal_owner) |*owner| owner.deinit();
         self.pool.deinit(self.allocator);
         self.stages.deinit(self.allocator);
         self.timers.deinit(self.allocator);
@@ -123,7 +113,15 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
-        self.log.message(.info, "started", "listening on {s}; capacity={d} handshakes={d} buffers={f}", .{
+        return self.runLoop(false);
+    }
+
+    pub fn runWorker(self: *Server) !void {
+        return self.runLoop(true);
+    }
+
+    fn runLoop(self: *Server, comptime threaded: bool) !void {
+        self.log.message(if (threaded) .debug else .info, "started", "listening on {s}; capacity={d} handshakes={d} buffers={f}", .{
             self.config.raw.value.listen, self.slots.len, self.stages.entries.len, logging.Bytes{ .value = Config.bufferBytes(self.config.raw.value) },
         });
         var events: [256]linux.epoll_event = undefined;
@@ -131,7 +129,21 @@ pub const Server = struct {
         self.now_ms = now;
         self.log.begin(now, &self.counts);
         var stats = now + self.config.raw.value.stats_interval_ms;
+        if (threaded) self.worker_heartbeat_ms = now;
         serving: while (true) {
+            if (threaded) {
+                const mailbox = self.worker_control.?;
+                if (now -| self.worker_heartbeat_ms >= 1000) {
+                    mailbox.heartbeat.store(now, .monotonic);
+                    self.worker_heartbeat_ms = now;
+                }
+                // Check control before replaying a returned data batch, even
+                // when the wake fd would be last among ready events.
+                if (mailbox.commands.load(.acquire) != 0) {
+                    try self.workerCommands(now);
+                    if (self.stop_deadline_ms != null) break :serving;
+                }
+            }
             if (self.stop_deadline_ms) |deadline| {
                 if (self.counts.active == 0 or now >= deadline) break;
             }
@@ -150,6 +162,10 @@ pub const Server = struct {
             if (rc == events.len) self.io.metrics.add("epoll_full_batches", 1);
             now = try net.nowMs();
             self.now_ms = now;
+            if (threaded and self.worker_control.?.commands.load(.acquire) != 0) {
+                try self.workerCommands(now);
+                if (self.stop_deadline_ms != null) break :serving;
+            }
             for (events[0..rc]) |event| {
                 const token = event.data.u64;
                 if (token == 0) {
@@ -159,7 +175,7 @@ pub const Server = struct {
                 }
                 if (token == 1) {
                     self.io.metrics.add("signal_events", 1);
-                    try self.signal(now);
+                    if (threaded) try self.workerCommands(now) else try self.signal(now);
                     if (self.stop_deadline_ms != null) break :serving;
                     continue;
                 }
@@ -205,7 +221,28 @@ pub const Server = struct {
             self.log.tick(now);
         }
         for (self.pool.entries, 0..) |entry, index| if (entry.used) self.drop(@intCast(index));
-        self.log.stopped(&self.counts);
+        if (threaded) self.log.flush() else self.log.stopped(&self.counts);
+    }
+
+    fn workerCommands(self: *Server, now: u64) !void {
+        const mailbox = self.worker_control.?;
+        const flags = try mailbox.take();
+        if (flags & workers.stop != 0) {
+            try self.stop(now);
+            return;
+        }
+        if (flags & workers.level != 0) self.log.setLevel(@fromBackingInt(mailbox.desired_level.load(.monotonic)), now, &self.counts, false);
+        if (flags & workers.snapshot != 0) try mailbox.publish(self.counts, self.io.metrics);
+    }
+
+    pub fn stop(self: *Server, now: u64) !void {
+        if (self.stop_deadline_ms != null) return;
+        self.stop_deadline_ms = now;
+        if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0, &self.io.metrics);
+        self.listener_registered = false;
+        net.close(self.listener);
+        self.io.metrics.add("close", 1);
+        self.listener = -1;
     }
 
     fn admit(self: *Server, now: u64) !void {
@@ -373,12 +410,7 @@ pub const Server = struct {
                 self.log.cycle(now, &self.counts);
             } else if (self.stop_deadline_ms == null) {
                 self.log.message(.info, "stopping", "closing active connections; active={d}", .{self.counts.active});
-                self.stop_deadline_ms = now;
-                if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0, &self.io.metrics);
-                self.listener_registered = false;
-                net.close(self.listener);
-                self.io.metrics.add("close", 1);
-                self.listener = -1;
+                try self.stop(now);
             }
         }
     }

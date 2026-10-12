@@ -5,7 +5,7 @@ const counters_mod = @import("counters.zig");
 const Counters = counters_mod.Counters;
 const outcome = @import("io_result.zig");
 
-pub const Level = enum { none, @"error", warn, info, debug };
+pub const Level = enum(u8) { none, @"error", warn, info, debug };
 pub const Format = enum { text, json };
 const message_capacity = 640;
 const line_capacity = 4096;
@@ -95,6 +95,9 @@ pub const Logger = struct {
     level: Level = .info,
     format: Format = .text,
     sink: Sink = .{},
+    worker_id: ?u8 = null,
+    // Multi-worker gauge publication occurs only for uncommon fatal I/O.
+    other_errno: ?*std.atomic.Value(u64) = null,
     previous_activity: Counters = .{},
     previous_activity_ms: u64 = 0,
     pending_warning: Warnings = .{},
@@ -130,7 +133,22 @@ pub const Logger = struct {
 
     fn emit(self: *const Logger, level: Level, comptime event: []const u8, body: []const u8) void {
         var line: [line_capacity]u8 = undefined;
-        self.sink.write(self.sink.context, render(self.format, level, event, body, wallSeconds(), &line));
+        const bytes = render(self.format, level, event, body, wallSeconds(), &line);
+        if (self.worker_id) |id| {
+            if (self.format == .json) {
+                const tail = std.mem.print(line[bytes.len - 2 ..], ",\"worker\":{d}}}\n", .{id}) catch unreachable;
+                self.sink.write(self.sink.context, line[0 .. bytes.len - 2 + tail.len]);
+            } else {
+                // The prefix is fixed ASCII; insert an identity without touching
+                // the escaped message or widening its formatting buffer.
+                const prefix: usize = 27;
+                var label: [16]u8 = undefined;
+                const tag = std.mem.print(&label, "worker={d} | ", .{id}) catch unreachable;
+                @memmove(line[prefix + tag.len ..][0 .. bytes.len - prefix], line[prefix..bytes.len]);
+                @memcpy(line[prefix..][0..tag.len], tag);
+                self.sink.write(self.sink.context, line[0 .. bytes.len + tag.len]);
+            }
+        } else self.sink.write(self.sink.context, bytes);
     }
 
     /// Record only cold failure paths; the full machine counters remain separate.
@@ -151,6 +169,7 @@ pub const Logger = struct {
                     return;
                 },
                 else => {
+                    if (self.other_errno) |gauge| gauge.store(@backingInt(err), .monotonic);
                     if (!self.enabled(.@"error")) return;
                     self.pending_error.other_io_errors +%= 1;
                 },
@@ -272,17 +291,34 @@ pub const Logger = struct {
     pub fn cycle(self: *Logger, now: u64, counts: *const Counters) void {
         self.flush();
         self.periodic(now, counts);
-        self.level = switch (self.level) {
-            .info => .debug,
-            .debug => .none,
-            .none => .@"error",
-            .@"error" => .warn,
-            .warn => .info,
-        };
+        self.level = nextLevel(self.level);
         self.begin(now, counts); // Do not replay errors accumulated while muted.
         self.forceMessage(.info, "log_level", "log level changed to {s}", .{@tagName(self.level)});
     }
+
+    pub fn setLevel(self: *Logger, value: Level, now: u64, counts: *const Counters, announce: bool) void {
+        self.flush();
+        self.level = value;
+        self.begin(now, counts);
+        if (announce) self.forceMessage(.info, "log_level", "log level changed to {s}", .{@tagName(value)});
+    }
+
+    pub fn workerSnapshot(self: *const Logger, id: u8, counts: *const Counters) void {
+        self.forceMessage(.debug, "worker_stats", "worker={d} active={d} accepted={d} routed={d} closed={d} rejected={d} io_errors={d} up={d} down={d}", .{
+            id, counts.active, counts.accepted, counts.routed, counts.closed, counts.rejected, counts.io_errors, counts.bytes_client_to_backend, counts.bytes_backend_to_client,
+        });
+    }
 };
+
+pub fn nextLevel(value: Level) Level {
+    return switch (value) {
+        .info => .debug,
+        .debug => .none,
+        .none => .@"error",
+        .@"error" => .warn,
+        .warn => .info,
+    };
+}
 
 const Message = struct {
     bytes: [message_capacity]u8 = undefined,
@@ -439,6 +475,20 @@ const Capture = struct {
         return self.bytes[0..self.len];
     }
 };
+
+test "worker identity is escaped bounded metadata in text and JSON" {
+    var capture: Capture = .{};
+    var logger: Logger = .{ .worker_id = 15, .sink = .{ .context = &capture, .write = Capture.write } };
+    logger.message(.info, "test", "message\n", .{});
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "worker=15 | message\\x0a") != null);
+    capture.len = 0;
+    logger.format = .json;
+    logger.message(.info, "test", "message\n", .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, capture.slice(), .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 15), parsed.value.object.get("worker").?.integer);
+    try std.testing.expectEqualStrings("message\n", parsed.value.object.get("message").?.string);
+}
 
 test "logger consumes deltas once, limits bursts, filters severity and skips idle" {
     var capture: Capture = .{};

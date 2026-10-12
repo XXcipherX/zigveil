@@ -36,18 +36,51 @@ OUT is enabled only for queued output. A socket with no useful interest is remov
 preventing persistent hangup notifications from spinning a paused connection.
 The behavior follows [Linux epoll semantics](https://man7.org/linux/man-pages/man7/epoll.7.html).
 
-## Decision: one process, one serving thread
+## Decision: one process, independent serving owners
 
-A single loop gives exclusive ownership of fds, queues, pools and counters. No
-atomics, locks or cross-worker jobs are needed. Worker threads would preserve
-share-nothing connection state but still require startup/join coordination, signal
-broadcast and per-worker capacity accounting. They add little to a small deployment.
+Default `workers=1` runs the original owner in main. A comptime single-owner loop
+omits worker command/heartbeat operations, and a noinline entry keeps the runtime
+frame outside this stack path. Explicit `workers=2..16` creates native Linux
+threads, each with its own Server, epoll, listener, pools, indexed timers, Logger
+and Io. Connection.pump and its TCP state machine are unchanged.
 
-Independent processes with `SO_REUSEPORT` give optional core scaling and failure
-isolation through an external service manager. They multiply capacity reservations
-and divide accept load imperfectly; neither limitation is hidden. One process is
-the default, `reuse_port` is opt-in, and route tables must agree across processes.
-There is no speculative backend/worker abstraction.
+The controller installs one signal scope before spawn. Worker config views borrow
+the same immutable routes and resolved endpoints; they never deinit the original
+parsed JSON. Connection/staging capacities divide the process totals exactly,
+with remainders assigned by worker index. No zero-capacity owner is admitted.
+There is no elastic pool transfer: local exhaustion can reject a new flow while
+another owner has free slots. Linux reuseport hashes new connections; it does
+not balance bytes or application capacity and never migrates accepted sessions.
+Multiple workers enable reuseport automatically; with one owner the explicit
+reuse_port flag retains its behavior. External processes still have independent
+process limits and require coordinated route tables.
+
+`runtime.zig` initializes every Server and thread before releasing a serving gate.
+Partial init/spawn failure wakes STOP and joins the started prefix before restoring
+signals or freeing controller fds. Each worker closes its listener before error
+teardown, then publishes final counters with release ordering. A failed loop stops
+its peers. Thirty-second heartbeat/cleanup bounds terminate a wedged process
+instead of freeing memory still owned by a thread; ordinary shutdown has no drain
+delay. Panic remains a process failure.
+
+Each owner has a separate eventfd. Command bits coalesce START/STOP/SNAPSHOT/LEVEL,
+with STOP taking priority. Requested snapshots publish a generation with release;
+the controller acquires every owner and copies all values before a second request.
+Final snapshots have separate storage so unexpected exit cannot race a reader.
+No atomic byte accounting or payload handoff is added. Multi-owner loops check
+commands per epoll batch and publish at most one heartbeat per second.
+
+Live totals cover nearby sampling times. Periodic INFO is emitted once by the
+controller; SIGUSR1 also identifies each worker. SIGUSR2 publishes one absolute
+level and waits for snapshot acknowledgements before announcing it. Worker-local
+failure batches retain their bounded rate. Complete log writes use a cold futex
+mutex; no I/O/counter/command locks are held while joining. The uncommon errno
+gauge is published atomically only on fatal uncommon errors, never summed.
+stderr backpressure remains a transport limitation, including for the controller.
+
+Auto mode is deliberately absent. Affinity count does not describe cgroup CPU
+bandwidth, sibling competition, available memory or a network bottleneck.
+Choosing explicit N at startup keeps the default behavior predictable.
 
 ## Ownership map
 
@@ -64,7 +97,10 @@ There is no speculative backend/worker abstraction.
 | `buffer.zig` | Fixed ring indices and readable/writable spans |
 | `pool.zig` | Single-owner freelist, token generations and stale-event checks |
 | `linux_io.zig` | Socket/clock/address syscall boundary and diagnostics |
-| `relay_pipe.zig` | Process-owned pipe handles and callback-local borrowed debt |
+| `relay_pipe.zig` | Owner-local pipe handles and callback-local borrowed debt |
+| `runtime.zig` | Multi-owner startup gate, signal coordination, snapshots, stop/join |
+| `signals.zig` | Process signal mask, signalfd and scoped SIGPIPE disposition |
+| `worker_control.zig` | Cold eventfd commands, snapshot publication and complete log writer |
 | `io_result.zig` | Value result carrying an exact Linux errno; socket side and operation types |
 | `counters.zig` | Single-owner counters, error dimensions and bounded stats formatting |
 | `metrics.zig` | Compile-time optional dataplane diagnostics, zero storage when disabled |
@@ -146,8 +182,8 @@ list cannot block on an undrained queue or grow memory. Only the first address o
 each family is retained. The lookup future is joined before its name buffer/queue
 leave scope, and the worker is joined and resolver resources released before
 `Server.init`. Numeric-only startup does not initialize this instance. Compilation
-permits that startup worker; no worker, DNS context or DNS allocation reaches the
-serving path. This is separate from the single owner of all relay state.
+permits that startup worker; no lookup worker, DNS context or DNS allocation reaches
+the serving path. All owners share the resolved immutable endpoint snapshot.
 
 Each connection owns two ring slices throughout its life. The prefix slice is sent
 directly before any later client bytes. It is not copied into a relay ring. The
@@ -261,7 +297,7 @@ prefix size and accumulated tiny messages do not. Activation waits for the prefi
 and that direction's ring debt to drain. Splice can resume in the same callback
 after draining a previous ring spill. Reads respect the remaining byte quantum
 while the destination is writable, avoiding fairness-induced pipe debt. The
-single serving owner lazily acquires two bounded
+each serving owner lazily acquires two bounded
 NONBLOCK/CLOEXEC pipes, resized to the configured ring capacity. Failure closes
 partial allocations and leaves buffered forwarding available.
 
@@ -311,11 +347,13 @@ All sizes are
 startup reservations; virtual capacity, touched RSS and kernel socket memory are
 different measurements. Buffer capacity above 1 GiB is rejected and startup checks
 `RLIMIT_NOFILE >= 2 × max_connections + 12`. Splice-disabled builds need `+ 8`.
-Shared pipe capacity is two ring sizes in kernel memory, with four process-owned
-fds regardless of stream count. Pool/connection/config metadata is extra.
+Shared pipe capacity is two ring sizes per owner, with four owner-local fds
+regardless of stream count. For N>1 check `2*C+8*N+8` fds, or `2*C+4*N+8` without
+splice. Pool/connection/config metadata and native thread stacks are extra.
 
 Startup uses NONBLOCK/CLOEXEC sockets, accept4 and a backlog of 1024. SO_REUSEADDR
-permits restarting a listener; SO_REUSEPORT is only for explicit process scale-out.
+permits restarting a listener; SO_REUSEPORT groups internal worker listeners and
+can also support explicitly coordinated external processes.
 IPv6 listeners are V6ONLY so the family is predictable. TCP_NODELAY avoids buffering
 small forwarding writes; large streams are not expected to benefit from it alone.
 Keepalive, TCP_USER_TIMEOUT and forced socket buffer sizes are deferred to workload
@@ -336,7 +374,8 @@ At most 256 due entries are processed per event batch, balancing expiration work
 against socket/signal handling. These are algorithmic costs, not measured speedups.
 Timer nodes and indices add 20 bytes per capacity slot on the supported 64-bit targets.
 
-SIGINT/TERM/USR1/USR2 are blocked and consumed through signalfd in the owning loop.
+With workers=1, SIGINT/TERM/USR1/USR2 are blocked and consumed through signalfd
+in the owning loop. Multi-owner signal flow is described above.
 The first SIGINT/SIGTERM sets the stop deadline to the current time, removes the
 listener registration and closes the listener once. After consuming the signal
 batch, run leaves event dispatch immediately, without processing further socket
@@ -346,12 +385,13 @@ staging/connection reservations. Each close decrements active and increments clo
 once; shutdown does not fabricate I/O errors or forwarded bytes. Unsent prefix/ring
 bytes may be discarded. Repeat stop signals leave the stop request unchanged.
 Pumps have already returned every shared-pipe borrow before signalfd is handled.
-Server.deinit therefore owns pipe closure, signalfd/epoll closure, signal-state
-restoration, pool/timer storage and both buffer slabs; it finds no live slots after
+Server.deinit therefore owns pipe/epoll closure, pool/timer storage and both buffer
+slabs. The single owner also restores its Signals scope; the multi-owner controller
+does so after all joins. Server finds no live slots after
 a normal run exit. SIGUSR1 requests totals, while SIGUSR2 cycles runtime verbosity.
 Diagnostics use fixed-buffer stderr writes and need a functioning sink.
 Enabled pending failure batches and final totals are logged after connection
-cleanup. No connection-drain wait, shutdown configuration or extra owner is added.
+cleanup. No connection-drain wait or shutdown configuration is added.
 There is no packet logging or HTTP admin server.
 The Compose installer updates by recreating its container. New accepts pause
 through shutdown and replacement startup, and existing streams are interrupted.
@@ -412,9 +452,11 @@ for an explicitly requested or enabled JSON periodic/final snapshot.
 ## Live logging
 
 `log.zig` owns the level, format, one previous counter snapshot and fixed warning/error
-batches through a Logger borrowed by Server from main. The serving loop owns all
-logger mutations, including SIGUSR2 level changes. There is no global logger, mutex, logging worker, heap queue
-or per-packet formatting. Levels are filtered before formatting or wall-clock I/O.
+batches through a Logger borrowed by Server from its owner. The serving loop owns all
+logger mutations. Multi-worker mode has one local Logger per owner and a controller
+Logger for aggregate statistics; only complete writes share a cold mutex. There
+is no logging thread, heap queue or per-packet formatting. Levels are filtered
+before formatting or wall-clock I/O.
 
 Default text output has UTC timestamps, aligned severity labels and human-readable
 byte volumes. Text INFO contains the current active gauge, cumulative original-stream
@@ -455,7 +497,7 @@ compile-time maximum-width bounds; JSON/text escaping prevents newlines and cont
 bytes from forging events or terminal controls. The line bound covers six-byte JSON
 escapes for every message byte. Byte-unit arithmetic remains safe at maximum u64.
 Writes retry EINTR and partial writes, without growing storage; a blocked stderr can
-still stall the single serving loop. debug verbosity is intended for diagnosis.
+still stall its owner and a shared sink can stall control. debug verbosity is intended for diagnosis.
 
 Compose installer readiness checks an owned LISTEN socket through the container's
 host PID, rather than requiring a startup log at info. Explicit --check diagnostics
@@ -517,7 +559,7 @@ does not change serving buffers or establish a forwarding performance gain.
 
 The optional `-Ddataplane_metrics=true` build records syscall outcomes, pump exits,
 readiness batches and interest transitions.
-`linux_io.Io` owns its single-threaded counters; snapshots are emitted only on
+Each `linux_io.Io` owns its local counters; diagnostic snapshots are emitted only on
 SIGUSR1 as a separate `event: dataplane` JSON object. Ordinary builds use a zero-size
 metrics type and compile out counter updates. Production stats and
 logging retain their existing schema and behavior. There are no per-packet clocks,
@@ -538,24 +580,24 @@ capability failures remain explicit missing measurements. Metrics builds and per
 recording are diagnostic variants, with ordinary fast results retained
 separately for performance comparisons.
 
-The selected splice path has fixed process-owned kernel queues and bounded ring
+The selected splice path has fixed owner-local kernel queues and bounded ring
 spill. send_zc would introduce page/notification lifetime bookkeeping; multishot
 recv would change buffer ownership and queue handling. Alternative submission
 or event-loop designs require a measured bottleneck and paired verification.
 
 ## Dataplane choices
 
-The retained dataplane uses 64 KiB rings, two process-owned pipes, a 256 KiB/128-call
+The retained dataplane uses 64 KiB rings, two owner-local pipes, a 256 KiB/128-call
 quantum per direction and adaptive return to buffered I/O for short messages.
 `relay_pipe.Pipe` stores handles owned by Io. `Borrowed` stores only a callback's
 handle copy, pending debt and page-pressure pause. A pump's defer empties its pipe
 on every exit; `assertPipesReturned` verifies this before a slot is recycled.
 Spilled bytes belong to the connection's ring and precede later socket input.
-The single serving owner makes another connection's concurrent borrow impossible.
+Exclusive serving ownership makes another connection's concurrent borrow of that pair impossible.
 
 | Choice | Cost and ownership contract |
 | --- | --- |
-| Two process-owned pipes | Four extra fds per process, independent of connection count; every callback returns its borrow empty. |
+| Two owner-local pipes | Four extra fds per owner, independent of connection count; every callback returns its borrow empty. |
 | Default 64 KiB rings | Startup-bounded storage; spills preserve byte order and resume the shared path after draining. |
 | Direct event dispatch | Role/generation checks precede each drive; no second ready queue or cached per-direction readiness state. |
 | 256 KiB / 128-call quantum | Bounds per-direction work per dispatch while allowing a stream to span several buffers. |

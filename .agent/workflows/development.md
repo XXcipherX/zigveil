@@ -75,6 +75,17 @@ Do not wait for real keepalive expiry or add per-relay option calls.
 
 5. Review the full diff for unchecked arithmetic, stale slices, prefix offsets,
    backpressure masks, FIN ordering, fd/token reuse, deadline progress and teardown.
+
+Multi-worker changes require `test/workers.py` against debug/fast on every native
+CPU profile, instrumented and buffered builds, and the scratch restart smoke.
+The suite reuses existing real TLS, PROXY v2, FIN, reset and duplex cases, then
+checks distinct owners, summed bytes, partition limits, acknowledged levels,
+muted snapshots, repeated stop, no children and listener reclamation. Unit tests
+inject comptime init/spawn/event-loop failure through the production lifecycle;
+keep those hooks absent from shipping config/environment. The baseline amd64 CI
+also runs safe units and real multi-worker relay with `-Dtsan=true`. Pass `--tsan`
+to the worker harness only for that binary; its exact thread count includes one
+sanitizer background thread. Normal builds retain strict serving-thread counts.
 6. Update README, design notes, agent guides and fixtures when their contract changes.
    Source is authoritative; documents must not describe an abandoned implementation.
    Routing changes must cover classification failure, partial/empty EOF and hello

@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     if (target.result.os.tag != .linux) @panic("Zigveil supports Linux; use -Dtarget=x86_64-linux or -Dtarget=aarch64-linux");
     const optimize = b.standardOptimizeOption(.{});
+    const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer for explicit Linux concurrency checks") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "dataplane_metrics", b.option(bool, "dataplane_metrics", "Compile diagnostic dataplane counters (default false)") orelse false);
     options.addOption(bool, "relay_splice", b.option(bool, "relay_splice", "Enable bounded Linux splice relay (default true)") orelse true);
@@ -16,6 +17,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     exe.root_module.addOptions("build_options", options);
@@ -26,6 +28,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     tests.root_module.addOptions("build_options", options);

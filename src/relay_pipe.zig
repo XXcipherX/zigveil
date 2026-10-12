@@ -1,4 +1,4 @@
-//! Process-owned handles and callback-local debt. Socket roles own readiness/FINs.
+//! Serving-owner handles and callback-local debt. Socket roles own readiness/FINs.
 pub const enabled = @import("build_options").relay_splice;
 /// Owned and closed by linux_io.Io; never transferred to a connection slot.
 pub const Pipe = struct {

@@ -14,4 +14,6 @@ test {
     _ = @import("startup_dns.zig");
     _ = @import("log.zig");
     _ = @import("metrics.zig");
+    _ = @import("worker_control.zig");
+    _ = @import("runtime.zig");
 }

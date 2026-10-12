@@ -14,6 +14,7 @@ pub const TcpKeepalive = struct {
 pub const Raw = struct {
     listen: []const u8,
     routes: []const struct { sni: []const u8, backend: []const u8 },
+    workers: u8 = 1,
     fallback: ?[]const u8 = null,
     fallback_proxy_protocol: u8 = 0,
     max_connections: u32 = 1024,
@@ -32,6 +33,7 @@ pub const Raw = struct {
 
 pub const Route = struct { name: Name, backend: Address };
 pub const Config = struct {
+    pub const max_workers: u8 = 16;
     raw: std.json.Parsed(Raw),
     listen: Address,
     routes: []Route,
@@ -48,10 +50,12 @@ pub const Config = struct {
         const parsed = try std.json.parseFromSlice(Raw, allocator, bytes, .{});
         errdefer parsed.deinit();
         const raw = parsed.value;
+        if (raw.workers == 0 or raw.workers > max_workers) return error.WorkersMustBe1To16;
         if (raw.fallback_proxy_protocol != 0 and raw.fallback_proxy_protocol != 2) return error.FallbackProxyProtocolMustBeZeroOrTwo;
         if (raw.fallback_proxy_protocol != 0 and raw.fallback == null) return error.ProxyProtocolRequiresFallback;
         if (raw.max_connections == 0 or raw.max_connections > 65536) return error.MaxConnectionsOutOfRange;
         if (raw.max_handshakes == 0 or raw.max_handshakes > raw.max_connections) return error.MaxHandshakesOutOfRange;
+        if (raw.max_connections < raw.workers or raw.max_handshakes < raw.workers) return error.WorkersExceedConnectionOrHandshakeCapacity;
         const n = raw.relay_buffer_bytes;
         if (n < 4096 or n > 65536 or n & (n - 1) != 0) return error.RelayBufferMustBePowerOfTwoBetween4And64KiB;
         if (raw.hello_timeout_ms < 250 or raw.hello_timeout_ms > 60000) return error.HelloTimeoutMustBe250To60000Ms;
@@ -169,6 +173,31 @@ test "exact canonical routes, missing and unknown names, fallback" {
     try std.testing.expect(config.lookup(&unknown) == null);
     try std.testing.expect(config.lookup(null) == null);
     try std.testing.expect(config.fallback != null);
+    try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024), Config.bufferBytes(config.raw.value));
+    try std.testing.expectEqual(@as(u8, 1), config.raw.value.workers);
+}
+
+test "workers validate before DNS and do not multiply reservations" {
+    var resolver: TestResolver = .{ .target = try Address.parseLiteral("203.0.113.10:1") };
+    for ([_][]const u8{
+        "\"workers\":0",
+        "\"workers\":17",
+        "\"workers\":2,\"max_connections\":1,\"max_handshakes\":1",
+        "\"workers\":4,\"max_handshakes\":3",
+    }) |settings| {
+        var storage: [512]u8 = undefined;
+        const input = try std.mem.print(&storage, "{{\"listen\":\"127.0.0.1:8443\",\"routes\":[],\"fallback\":\"backend.test:9443\",{s}}}", .{settings});
+        if (Config.parseWithResolver(std.testing.allocator, input, &resolver)) |value| {
+            var unexpected = value;
+            unexpected.deinit(std.testing.allocator);
+            return error.ExpectedWorkerRejection;
+        } else |_| {}
+    }
+    try std.testing.expectEqual(@as(usize, 0), resolver.calls);
+    var config = try Config.parse(std.testing.allocator,
+        \\{"listen":"127.0.0.1:8443","routes":[],"fallback":"127.0.0.1:9443","workers":16}
+    );
+    defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024), Config.bufferBytes(config.raw.value));
 }
 

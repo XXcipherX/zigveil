@@ -4,6 +4,7 @@ const net = @import("linux_io.zig");
 const Config = @import("config.zig").Config;
 const Server = @import("server.zig").Server;
 const Logger = @import("log.zig").Logger;
+const Runtime = @import("runtime.zig").Runtime;
 
 // Minimal keeps startup I/O explicit; hostname resolution ends before serving.
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -26,7 +27,7 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
         return;
     }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        net.print("Usage: zigveil CONFIG.json\n       zigveil --check CONFIG.json\n       zigveil --help | --version\nSIGUSR1 prints totals; SIGUSR2 cycles info/debug/none/error/warn.\nSIGTERM/SIGINT close active connections and exit without draining.\n", .{});
+        net.print("Usage: zigveil CONFIG.json\n       zigveil --check CONFIG.json\n       zigveil --help | --version\nConfig workers: 1..16, default 1; connection/handshake limits are process totals.\nSIGUSR1 prints totals; SIGUSR2 cycles info/debug/none/error/warn.\nSIGTERM/SIGINT close active connections and exit without draining.\n", .{});
         return;
     }
     const check = args.len == 3 and std.mem.eql(u8, args[1], "--check");
@@ -43,14 +44,23 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
     defer config.deinit(allocator);
     log.level = if (check) .info else config.raw.value.log_level;
     log.format = config.raw.value.log_format;
-    try net.checkFdLimit(config.raw.value.max_connections);
+    try net.checkWorkerFdLimit(config.raw.value.max_connections, config.raw.value.workers);
     if (check) {
-        net.print("zigveil: config valid; routes={d} fallback={} fallback_proxy_protocol={d} buffers={d} bytes; fd limit sufficient\n", .{ config.routes.len, config.fallback != null, config.raw.value.fallback_proxy_protocol, Config.bufferBytes(config.raw.value) });
+        net.print("zigveil: config valid; routes={d} fallback={} fallback_proxy_protocol={d} workers={d} buffers={d} bytes; fd limit sufficient\n", .{ config.routes.len, config.fallback != null, config.raw.value.fallback_proxy_protocol, config.raw.value.workers, Config.bufferBytes(config.raw.value) });
         return;
+    }
+    if (config.raw.value.workers > 1) {
+        return runWorkers(&config, log);
     }
     var server = try Server.init(std.heap.page_allocator, &config, log);
     defer server.deinit();
     try server.run();
+}
+
+// Keep the bounded multi-worker frame out of the single-owner stack path.
+noinline fn runWorkers(config: *const Config, log: *Logger) !void {
+    var runtime: Runtime = .{};
+    try runtime.run(std.heap.page_allocator, config, log);
 }
 
 fn readConfig(allocator: std.mem.Allocator, path: [:0]const u8) ![]const u8 {

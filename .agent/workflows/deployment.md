@@ -70,7 +70,8 @@ diagnostic and reports failure even when automatic daemon logs are disabled.
 1. Prepare the Linux service host and dedicated `zigveil` user/group.
 2. Copy the binary to `/usr/local/bin/zigveil` and a validated operator config to
    `/etc/zigveil/config.json`. Replace documentation-only endpoint addresses.
-3. Ensure the descriptor limit covers `2 × max_connections + 12`. The supplied unit
+3. Ensure the descriptor limit covers `linux_io.requiredFds(C, N)`: single owner
+   `2*C+12`, multiple owners `2*C+8*N+8` (smaller without splice). The supplied unit
    sets 65536; increase it if your configured capacity requires more.
 4. Check backend reachability, avoid routes back to the proxy, and run `--check`.
 5. Install `deploy/zigveil.service` as `/etc/systemd/system/zigveil.service`, then
@@ -91,6 +92,10 @@ Verify an actual client through each route, byte counters, handshake/connect/idl
 behavior and clean shutdown. A config check does not verify backend reachability.
 It resolves hostname backends before bind. DNS changes require a restart; no
 runtime lookup or TTL refresh happens in the serving loop.
-For process scale-out, manage multiple independent units with identical routes and
-`reuse_port: true`; count resource limits and metrics per process. Do not introduce
-an in-process worker manager just to match host core count.
+Keep one container/service/process. Explicit `workers: 1..16` creates internal
+owners; default 1 preserves old installs. C/H are shared process totals, divided
+with remainders. Multi-worker listeners enable reuseport internally. Readiness
+still uses socket ownership of the single process, independent of verbosity.
+The installer preserves the user's workers value with the rest of the JSON.
+Use the existing pull/recreate/restart workflow; no replicas or supervisor.
+Check the controller's startup worker count and SIGUSR1 worker_stats after restart.

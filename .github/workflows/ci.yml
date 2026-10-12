@@ -78,7 +78,9 @@ jobs:
           python3 bench/harness.py smoke
       - name: debug Linux socket integration
         if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
-        run: python3 test/integration.py --binary zig-out/bin/zigveil
+        run: |
+          python3 test/integration.py --binary zig-out/bin/zigveil
+          python3 test/workers.py --binary zig-out/bin/zigveil
       - name: debug controlled DNS integration
         if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
         run: sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
@@ -91,7 +93,9 @@ jobs:
           zig build test -Doptimize=fast -Dcpu="$ZIGVEIL_CPU"
       - name: fast Linux socket integration
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
-        run: python3 test/integration.py --binary zig-out/bin/zigveil
+        run: |
+          python3 test/integration.py --binary zig-out/bin/zigveil
+          python3 test/workers.py --binary zig-out/bin/zigveil
       - name: fast controlled DNS integration
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
         run: sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
@@ -108,6 +112,7 @@ jobs:
           cp zig-out/bin/zigveil "$RUNNER_TEMP/zigveil-normal"
           zig build -Doptimize=fast -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
+          python3 test/workers.py --binary zig-out/bin/zigveil --diagnostics
           ulimit -n 32768
           timeout 120s python3 test/bench_harness.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
           python3 test/bench_lab.py --binary zig-out/bin/zigveil --normal-binary "$RUNNER_TEMP/zigveil-normal" --native-binary zig-out/bin/zigveil-bench
@@ -120,6 +125,7 @@ jobs:
           zig build test -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true -Dcpu="$ZIGVEIL_CPU"
           zig build -Doptimize=fast -Drelay_splice=false -Ddataplane_metrics=true -Dbench_tools=true -Dcpu="$ZIGVEIL_CPU"
           python3 test/integration.py --binary zig-out/bin/zigveil --diagnostics
+          python3 test/workers.py --binary zig-out/bin/zigveil --buffered --diagnostics
           python3 test/bench_lab.py --binary zig-out/bin/zigveil --native-binary zig-out/bin/zigveil-bench
       - name: Shared splice ownership and spill correctness
         if: ${{ !cancelled() && steps.zig.outcome == 'success' }}
@@ -132,6 +138,14 @@ jobs:
             --duration 1 --repeats 1 --workloads bulk:1000,loaded-latency:10,churn:1 --rings 65536 --profiling basic --require-workloads \
             --options '{"variants":["metrics"],"relay_splice":true,"generator_workers":1,"origin_io":"splice","warmup":0.05}' \
             --output "$RUNNER_TEMP/shared-splice-checks"
+      - name: ThreadSanitizer worker lifecycle and real relay
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' && matrix.arch == 'amd64' && matrix.cpu == 'baseline' }}
+        env:
+          TSAN_OPTIONS: halt_on_error=1:exitcode=66
+        run: |
+          zig build test -Doptimize=safe -Dtsan=true -Dcpu=baseline
+          zig build -Doptimize=safe -Dtsan=true -Dcpu=baseline --prefix "$RUNNER_TEMP/tsan"
+          python3 test/workers.py --binary "$RUNNER_TEMP/tsan/bin/zigveil" --tsan
   docker:
     name: Docker ${{ matrix.arch }} ${{ matrix.mode }}
     runs-on: ${{ matrix.runner }}

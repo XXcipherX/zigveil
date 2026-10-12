@@ -112,6 +112,12 @@ def smoke(image):
                 except ConnectionResetError:
                     pass
             assert command("docker", "inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
+            assert path.read_bytes() == before
+            config["workers"] = 2
+            path.write_text(json.dumps(config), encoding="utf-8")
+            before = path.read_bytes()
+            command(*common, "--add-host", "backend.test:127.0.0.1", "--mount", mount, image,
+                    "--check", "/etc/zigveil/config.json")
             command("docker", "start", name)
             deadline = time.monotonic() + 15
             while True:
@@ -126,6 +132,12 @@ def smoke(image):
                     if time.monotonic() >= deadline:
                         raise AssertionError("restarted container failed to listen")
                     time.sleep(.1)
+            # docker top uses host tools; the scratch image still has no shell
+            # or process inspector. One process must own its serving threads.
+            processes = command("docker", "top", name, "-eo", "pid,comm").stdout.splitlines()
+            threads = command("docker", "top", name, "-eLo", "pid,tid,comm").stdout.splitlines()
+            assert len(processes) == 2, processes
+            assert len(threads) >= 4, threads
             command("docker", "stop", "--timeout", "35", name)
             assert command("docker", "inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
             assert path.read_bytes() == before

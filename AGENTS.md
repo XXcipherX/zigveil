@@ -26,8 +26,10 @@ Read the relevant project guides before changing behavior:
 6. Slot generations must be validated before any cached epoll event touches state.
 7. A blocked peer must suppress the appropriate source read; EAGAIN is not progress.
 8. Absolute hello/connect/prefix deadlines must survive activity and disabled idle.
-9. One loop owns all mutable dataplane state. No global state, locks or dataplane
-   threads. Startup lookup workers must finish before any listener is bound.
+9. Each serving loop owns its mutable dataplane state. Workers never share sockets,
+   rings, pools, timers or splice borrows. Process control and complete log writes
+   are cold synchronization only; no payload handoff or atomic byte counters.
+   Startup lookup workers must finish before any listener is bound.
    DNS receive drains obey absolute retry/lookup deadlines even while data is ready.
 10. Keep docs/config/test expectations aligned with implemented behavior.
 11. Preserve exact Linux errno by value. Count fatal I/O once, with one actual
@@ -37,7 +39,7 @@ Read the relevant project guides before changing behavior:
     configured route. No payloads or client IPs. Preserve grouped warning rate limits,
     hello/idle versus connect/prefix severity, idle suppression, explicit snapshots
     and the complete unchanged JSON counter schema.
-13. Io owns two shared pipes, never a slot. A pump returns its borrow empty on
+13. Each worker's Io owns two shared pipes, never a slot. A pump returns its borrow empty on
     every exit; deferred live bytes belong to that connection's fixed ring.
     Adaptive eligibility/short-read counts belong to each Direction; opposite
     traffic must not select its mode or gate its drained deactivation.
@@ -57,6 +59,15 @@ Read the relevant project guides before changing behavior:
     on admitted clients and new backends before connect. Defaults add no calls or
     overwrite inherited options. Validate Linux int bounds before DNS/bind; preserve
     setup errno/fd ownership. Probes/ACKs never count as stream I/O or refresh idle.
+18. workers defaults to 1; explicit 1..16 only. C/H are process totals divided with
+    remainders, never cloned. Require at least one slot/stage per owner. Check the
+    shared fd table for all listeners/epolls/eventfds/pipes before spawning.
+19. Runtime addresses are stable after threads spawn. Gate serving until every
+    worker exists. One process signal scope precedes spawn and outlives all joins.
+    Each worker owns Server cleanup; the controller owns control/completion fds.
+    Separate request snapshots from final snapshots. Acquire publication before
+    reading; never overwrite until the controller consumes the old generation.
+    On worker failure stop peers; close the failed listener before teardown.
 
 ## Change discipline
 
@@ -67,7 +78,7 @@ verify OS interactions through Linux integration tests. Report actual test resul
 do not infer that a check passed merely from successful compilation.
 
 Do not add speculative event backends, zero-copy machinery, HTTP features, runtime
-DNS refresh/discovery or worker frameworks. Explain algorithmic costs and ownership for
+DNS refresh/discovery or alternative worker frameworks. Explain algorithmic costs and ownership for
 structural choices. Quantified performance claims need controlled measurements
 with workload, capacity, build mode, CPU/kernel versions and raw data. Keep the
 architecture justified by this project's own requirements and measurements.

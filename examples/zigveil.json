@@ -6,6 +6,7 @@
     { "sni": "example.net", "backend": "203.0.113.30:443" }
   ],
   "fallback_proxy_protocol": 0,
+  "workers": 1,
   "max_connections": 1024,
   "max_handshakes": 64,
   "relay_buffer_bytes": 65536,

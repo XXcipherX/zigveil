@@ -19,6 +19,7 @@ from pathlib import Path
 BINARY = "zig-out/bin/zigveil"
 SPLICE = False
 DIAGNOSTICS = False
+SANITIZER_THREADS = 0
 IO_OPERATIONS = ("client_read_errors", "client_write_errors", "backend_read_errors", "backend_write_errors",
                  "client_shutdown_errors", "backend_shutdown_errors", "client_socket_errors", "backend_socket_errors")
 IO_CAUSES = ("connection_resets", "broken_pipes", "not_connected", "connection_aborts",
@@ -370,7 +371,10 @@ class Integration(unittest.TestCase):
                         client.sendall(payload)
                     client.shutdown(socket.SHUT_WR)
                     self.assertEqual(payload, all_bytes(client))
-            self.assertEqual(1, len(os.listdir(f"/proc/{proxy.process.pid}/task")))
+            workers = proxy.config.get("workers", 1)
+            serving_threads = 1 if workers == 1 else workers + 1
+            self.assertEqual(serving_threads + SANITIZER_THREADS,
+                             len(os.listdir(f"/proc/{proxy.process.pid}/task")))
 
     def test_unknown_missing_invalid_and_fallback(self):
         with Origin() as origin:

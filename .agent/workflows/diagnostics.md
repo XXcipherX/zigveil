@@ -29,6 +29,17 @@ metadata, without payloads or client IPs. Changing
 verbosity does not reset counters or replay previously muted failures.
 No packet logging or admin listener is available.
 
+With multiple workers, INFO and raw stats are process aggregates; SIGUSR1 also
+emits worker_stats. DEBUG records contain worker identity, which scopes local
+connection IDs. Each owner has its own failure batch. SIGUSR2 is announced only
+after all owners acknowledge the absolute level. Live captures have nearby
+sampling times; final totals after joins include all cleanup. Do not add errno
+gauges or diagnostic maxima. Local pool exhaustion can happen below the total
+capacity under reuseport imbalance. Hashing balances neither bytes nor free slots.
+If an event loop fails, peers stop and the process exits with an error. The
+controller checks 30-second heartbeats; log transport backpressure can also stall
+control. Stop watchdogs remain the final external bound.
+
 Hostname backends resolve once during startup and `--check`, using the environment's
 hosts/resolver files. Resolution errors prevent listening; a DNS change requires a
 restart. The selected IPv4 (otherwise IPv6) still undergoes self-target checks.

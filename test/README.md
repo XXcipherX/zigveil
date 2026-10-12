@@ -5,6 +5,22 @@ Linux syscall-boundary tests.
 The artificial socket implementation drives **the production Connection engine**;
 it substitutes recv/send/connect/shutdown operations, not state transitions.
 
+`python3 test/workers.py --binary BINARY` exercises the actual multi-worker daemon:
+distinct reuseport listeners and serving owners, exact aggregate bytes, uneven
+capacity partitions, log-level acknowledgements, muted snapshots, SIGINT/SIGTERM
+with live slots, repeated signals, sixteen owners, fd limits and port reuse.
+It also reuses existing real TLS, fallback PROXY v2, duplex/backpressure, TCP
+options, both FIN orders and reset-accounting fixtures. Use `--buffered` for the
+splice-disabled build and `--diagnostics` for instrumented snapshots.
+Ordinary CI runs this on amd64 baseline/v3 and arm64; baseline amd64 additionally
+runs unit/lifecycle and real multi-worker tests under ThreadSanitizer. Use `--tsan`
+only with the sanitizer binary: the exact thread-count assertion includes its
+one runtime background thread. Ordinary binaries retain the strict serving count.
+Scratch
+smoke restarts the same container with two owners and verifies one process with
+multiple native threads. Comptime unit fault policies verify partial init/spawn
+cleanup and peer shutdown on worker error, with allocator leak checking.
+
 | Contract | Coverage |
 | --- | --- |
 | Complete/partial ClientHello | Every TCP prefix, single-byte deliveries, split record headers/fields |

@@ -26,7 +26,10 @@ Reflection uses `field_names`/`field_types`/`field_attrs`, with parallel iterati
 when names and types are both needed. Use `@splat` for repeated arrays,
 `@backingInt`/`@fromBackingInt` for enum backing values, `std.mem.print` for fixed
 format buffers, `std.mem.find`/`findScalar` for search and `@memmove` for overlap.
-`@fromBackingInt` needs the exact backing integer type.
+`@fromBackingInt(value)` infers its enum from the result context and needs the
+exact backing integer type; it does not accept an explicit enum argument.
+Large reflected diagnostic field loops may need a bounded
+`@setEvalBranchQuota`; keep field classification at comptime.
 The startup resolver uses one explicit concurrent worker and destroys its
 `std.Io.Threaded` instance before Server.init. Do not set the executable's
 single_threaded compile option or move resolver operations into the relay.
@@ -76,7 +79,7 @@ zero-window stalls and overrides the keepalive failure threshold after a probe,
 without changing probe cadence. Current SYN retry code may also consult it;
 retain absolute connect/prefix deadlines. Kernel probes do not refresh idle I/O.
 EINTR retries I/O, not Linux close. MSG_NOSIGNAL makes EPIPE an ordinary error.
-Splice has no MSG_NOSIGNAL flag: Server scopes SIGPIPE ignore/restore while the
+Splice has no MSG_NOSIGNAL flag: Signals scopes SIGPIPE ignore/restore while the
 shared path is enabled. Use nonblocking pipe/socket ends and null splice offsets.
 A pipe can exhaust page slots before its byte capacity; source EAGAIN with debt
 pauses reads until a successful write. Reclaim all pending bytes before returning
@@ -89,7 +92,8 @@ a positive errno, unlike the negative raw syscall result. Reading SO_ERROR clear
 it; do not add probes merely to collect diagnostics on successful I/O.
 
 Runtime logging uses the single-owner Logger, not std.log's global settings or
-stderr mutex. Keep raw counters separate from fixed failure batches and the traffic
+stderr mutex. Multi-worker mode serializes complete bounded lines with its own cold
+futex Writer; it does not share mutable Logger state. Keep raw counters separate from fixed failure batches and the traffic
 baseline. Divide wrapping byte deltas by actual monotonic elapsed time; keep
 cumulative totals intact and suppress unchanged active/traffic gauges. A zero-time
 summary retains its pending window rather than fabricating a rate. Non-exhaustive

@@ -8,7 +8,7 @@ description: Runtime ownership, bounded resources, SNI routing and opaque TCP re
 ## Stack and intent
 
 - Zig 0.17.0, Linux x86_64/aarch64, standard library only, no libc dependency.
-- One process, one level-triggered epoll loop, one mutable-state owner.
+- One process, 1..16 independent level-triggered epoll owners; default one.
 - Optional externally managed SO_REUSEPORT processes; limits remain per process.
 - Static numeric addresses after startup hostname resolution; immutable JSON config.
 - No termination or payload parsing after selection. Fallback alone may add an
@@ -23,6 +23,22 @@ JSON and Route array; its values outlive `Server`. The server owns all fds,
 registrations, connection slots, freelists and byte slabs. A slot borrows exactly
 two relay slices and, while needed, one staging slice. Configuration endpoints and
 owned `Name` values cannot refer into a recycled staging buffer.
+
+`runtime.zig` coordinates multiple owners only when workers > 1. Its fixed worker
+array and log writer must be initialized in place before spawn. Borrowed Config
+views share immutable routes/JSON but contain partitioned C/H; never deinit them.
+Each worker owns all Server cleanup, including its listener before error teardown.
+The controller owns its signalfd, completion fd and each control fd until joins.
+Initialize every worker before releasing START. STOP supersedes other commands.
+Preserve SNAPSHOT/LEVEL if they coalesce with START at the gate.
+
+Separate requested and final snapshots. Release/acquire generation publication
+protects plain counters; never read Server.counts from the controller or overwrite
+a requested snapshot before it is consumed. Only final counters are exact after
+join. Live captures have nearby sampling times. Counter sums exclude errno;
+diagnostic maxima use max. Keep the uncommon errno publication on failure only.
+No atomic byte increments, socket handoff or shared relay pipe pair is allowed.
+Single-owner runLoop(false) must compile out control/heartbeat work.
 
 `connection.zig` owns connection transitions, offsets, EOF/FIN and deadlines.
 `linux_io.zig` supplies synchronous nonblocking operations. `server.zig` reconciles
@@ -88,7 +104,7 @@ pipes close once with Io, never with a slot. `relay_pipe.Pipe` is the owned hand
 null borrows at teardown; it must not become a late drain or resource-release path.
 Adaptive eligibility and consecutive short-read counts belong to Direction.
 Check deactivation at pump entry only against that direction's debt. Keep the
-16 KiB activation, 1 KiB short-read and 32-read thresholds, process-owned pair and
+16 KiB activation, 1 KiB short-read and 32-read thresholds, owner-local pair and
 connection-wide allocation-failure fallback. Opposite traffic must not activate,
 reset or deactivate its peer's adaptive state. The fields fit existing Direction
 padding in supported CI builds; verify both splice-enabled and buffered layouts.
@@ -109,12 +125,14 @@ too and preserve the exact errno. `last_other_io_errno` is a gauge, not a third 
 Preserve FIN/reset semantics and classify only on failure. Stats retain a fixed
 buffer with a compile-time worst-case bound.
 
-`log.zig` is owned by main and borrowed by Server. Levels/formats come from config;
-SIGUSR2 changes only runtime verbosity in the serving loop. Periodic text INFO shows
+`log.zig` is owner-local; main retains the aggregate Logger in multi-worker mode.
+Levels/formats come from config; SIGUSR2 changes all owners through an acknowledged
+absolute-level command. The cold Writer mutex covers complete output lines only.
+Periodic text INFO shows
 cumulative up/down totals and rates from wrapping byte deltas over actual monotonic
 elapsed time. Suppress unchanged traffic/active gauges, even with idle connections.
 JSON stats retain every original counter. Warning/error events enter fixed batches
-on cold failure paths; emit at most one line per severity per second. Counts cover
+on cold failure paths; each owner emits at most one line per severity per second. Counts cover
 the batch and `last:` labels only its most recent event's context. Hello/idle expiry
 and reset/pipe outcomes stay in diagnostics/debug; connect/prefix expiry and actual
 admission/resource pressure warn. No arbitrary reset-count escalation.
@@ -132,7 +150,8 @@ cancel the timer, DEL registered socket roles, close both fds, return staging an
 release the slot, updating active/closed once. Queued userspace bytes may be
 discarded; stopping does not count as an I/O error. Final enabled logs follow drop.
 Every pump has already returned its borrow, so shared pipes remain Io-owned until
-Server.deinit closes them alongside signalfd/epoll and frees pools/slabs. Repeated
+Server.deinit closes its pipes/epoll and frees pools/slabs. The single owner also
+owns its Signals scope; multi-worker Signals restore only after all joins. Repeated
 stop signals must not close the listener again. There is no session drain window;
 Docker/systemd timeouts are emergency limits.
 
@@ -143,8 +162,11 @@ Headroom is 52 only with fallback PROXY v2 enabled, otherwise zero.
 Defaults: 1024/64 slots, 65536-byte rings, 132 MiB reserved buffer space.
 Metadata and kernel socket memory are additional; virtual capacity is not RSS.
 User-owned slabs allocate at startup. Splice acquires a fixed pair of kernel
-pipes lazily, with at most two ring capacities and four fds per process. Startup
-checks `2 × max_connections + 12` fds (`+ 8` when splice is disabled).
+pipes lazily, with at most two ring capacities and four fds per owner. Startup
+checks `2 × max_connections + 12` fds for N=1 (`+ 8` when splice is disabled).
+For N>1 use `2*C+8*N+8` or `2*C+4*N+8` without splice. C/H are process totals:
+divide with remainders; require both >= N; never clone whole slabs per owner.
+Explicit workers is 1..16 with default 1; no auto or forced affinity.
 Do not introduce per-packet allocation, copies
 for compaction, growing queues or hidden std.Io jobs.
 

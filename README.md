@@ -25,7 +25,7 @@ backend receives input that cannot select a route; after selection the stream is
 ## Scope
 
 - IPv4/IPv6 or hostname backends, exact ASCII SNI names and an optional fallback.
-- One serving thread and one level-triggered epoll loop per process.
+- One process with 1..16 serving owners, each with its own level-triggered epoll.
 - Startup-reserved pools and fixed rings; no serving-path heap allocation.
 - Partial I/O, bounded backpressure, independent EOF/FIN in both directions.
 - Absolute hello/connect/prefix deadlines and optional relay idle timeout.
@@ -124,6 +124,53 @@ canonical route names, invalid endpoints and unreasonable resource limits fail
 startup. The config file is capped at 1 MiB. `--check` validates without binding.
 Changing configuration requires a restart.
 
+## Serving workers
+
+Set `"workers": 2`, `4` or `8` to use more serving CPUs when many active streams
+saturate a single owner. The default remains `1`: no additional serving thread,
+controller loop or worker atomics run in that mode. Explicit integers 1..16 are
+supported; `0` is rejected. Affinity, CPU quotas, network limits and competing work
+make CPU-count-only auto selection unreliable, so there is no auto mode or CPU pinning.
+Additional workers do not accelerate the user-space relay of one TCP session.
+
+One container named `zigveil` still runs one process. Each worker owns its listener,
+epoll, connection/staging pools, rings, timers, counters and shared splice pair.
+Linux SO_REUSEPORT selects a listener for new connections by a flow hash; it does
+not balance bytes, inspect free slots or migrate accepted sessions between workers.
+`workers > 1` enables reuseport internally regardless of `reuse_port`; with one
+worker, `reuse_port` retains its existing explicit meaning.
+
+`max_connections` and `max_handshakes` remain totals for the whole process.
+Divide each by N, assigning its remainder to the first workers. No worker may have
+zero capacity, so both totals must be at least N. The total buffer reservation is
+unchanged: default 1024 connections/64 staging slots still reserve 132 MiB across
+all workers. Local exhaustion can reject traffic while another worker has free
+slots; there is no cross-worker socket or buffer transfer. Keep capacity headroom.
+Metadata, stacks and kernel TCP memory are additional. Zig native threads reserve
+16 MiB of virtual stack each by default; that is not a fixed RSS charge.
+
+For N=1, the fd requirement remains `2*C+12` (`2*C+8` without splice).
+For N>1, it is `2*C+8*N+8` (`2*C+4*N+8` without splice), including control fds
+and per-owner pipes. `--check` validates this before serving.
+
+The main thread receives process signals and wakes every owner through its own
+eventfd. SIGTERM/SIGINT close active sessions immediately and join all workers;
+there is no drain window. Failure of one event loop stops its peers. An owner
+without progress for over 30 seconds triggers process exit; Docker/systemd can
+then restart it. These limits are emergency bounds, not normal stop delays.
+
+INFO traffic and explicit totals are process aggregates. SIGUSR1 also emits
+`worker_stats` records identifying each owner; DEBUG lifecycle/failure records
+carry `worker`. SIGUSR2 changes every worker to the same level before announcing
+the change. Log writes are serialized as complete bounded lines, with no log lock
+on recv/send/splice. Slow stderr still causes logging backpressure.
+Live snapshots cover nearby owner sampling times, not one atomic instant.
+Final totals after joins are complete. The uncommon errno gauge reports the
+latest published fatal cause and is never added across workers.
+
+Compose pull/recreate and `systemctl restart zigveil` keep their current workflow.
+Change workers in the mounted config and recreate the single container.
+
 Validation rejects exact listener targets and same-port loopback targets covered
 by wildcard listeners: IPv4 `127/8` and IPv6 `::1`. This applies to routes and
 fallback, including mapped IPv4 destinations. IPv6 listeners are V6ONLY, so an
@@ -132,10 +179,11 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 
 | Optional key | Default | Meaning |
 | --- | --- | --- |
+| `workers` | `1` | Serving owners per process; explicit integer 1..16; no auto mode |
 | `fallback` | `null` | Default pre-routing backend; accepts an IP or hostname with port |
 | `fallback_proxy_protocol` | `0` | `0`: raw fallback stream; `2`: prepend PROXY v2 to fallback only; requires `fallback` |
 | `max_connections` | `1024` | Total slots per process; range 1..65536 |
-| `max_handshakes` | `64` | Staging slots; range 1..max_connections |
+| `max_handshakes` | `64` | Total staging slots per process; range 1..max_connections |
 | `relay_buffer_bytes` | `65536` | Per direction; powers of two from 4096..65536 |
 | `hello_timeout_ms` | `5000` | Absolute pre-routing deadline; range 250..60000 |
 | `connect_timeout_ms` | `5000` | Separate absolute connect and prefix-send deadlines |
@@ -145,7 +193,7 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `stats_interval_ms` | `30000` | Traffic summary interval; `0` disables summaries, while live warnings remain enabled |
 | `log_level` | `"info"` | `error`, `warn`, `info`, `debug` or `none` |
 | `log_format` | `"text"` | Readable `text` or machine-readable `json` |
-| `reuse_port` | `false` | Allow independently launched processes to share the listener |
+| `reuse_port` | `false` | Allow independent processes to share a single-owner listener; multiple workers enable it internally |
 
 TCP liveness options are independent and opt in. Omitting them preserves previous
 behavior without extra socket-option calls. Both apply once to admitted client
@@ -381,9 +429,10 @@ is not an RSS prediction. Kernel socket buffers and epoll storage are additional
 Buffer reservation above 1 GiB is rejected. A staging slot is returned after the
 entire received prefix has been sent, or on teardown; established relays retain
 only their two rings. Even with idle expiry disabled, prefix send remains bounded.
-The shared pipes add at most twice the configured ring capacity in kernel pipe
-storage and four descriptors per process. Startup requires a descriptor limit of
-at least `2 × max_connections + 12` (`+ 8` with splice disabled).
+Each owner's shared pipes add at most twice the configured ring capacity in kernel
+pipe storage and four descriptors. Single-owner startup requires at least
+`2 × max_connections + 12` fds (`+ 8` with splice disabled); multiple owners use
+the aggregate requirements in [serving workers](#serving-workers).
 
 The default ring size is 64 KiB. See the
 [dataplane choices](docs/DESIGN.md#dataplane-choices) for ownership and dispatch costs.
@@ -391,10 +440,10 @@ Smaller rings reduce memory
 reservation and transfer sizes. The [benchmark guide](bench/README.md) explains
 how to compare sizes and account for CPU, latency and memory together.
 
-One process is the default. When measurements justify more cores, launch independent
-processes with `reuse_port: true` and identical route tables, optionally pinning each
-to a CPU. Limits and counters are **per process**; they add across processes. There
-is no supervisor or dataplane worker-thread manager inside Zigveil.
+One process is the default. Increase `workers` when many streams saturate a serving
+CPU; see [serving workers](#serving-workers). Linux schedules the owners without
+forced affinity. Limits and aggregate counters remain **per process**. There is
+no process supervisor or additional container.
 
 ## Logging
 
