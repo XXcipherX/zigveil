@@ -461,6 +461,24 @@ Compose installer readiness checks an owned LISTEN socket through the container'
 host PID, rather than requiring a startup log at info. Explicit --check diagnostics
 stay visible even with log_level none; this preserves actionable preflight failures.
 
+## Minimal container runtime
+
+The production executable does not link libc; its Linux syscall boundary and
+startup resolver require no distribution libraries or NSS modules. The Docker
+builder checks the actual fast/safe PIE for ET_DYN, absence of PT_INTERP and
+absence of DT_NEEDED before copying it to `scratch`. This gate covers baseline
+amd64/arm64 and amd64-v3 images without changing executable build settings.
+
+The runtime contains the binary and an inactive documentation example. Docker
+provides hosts/resolver files; UTC formatting needs no timezone database and the
+opaque stream needs no CA certificates. An exec-form ENTRYPOINT starts Zigveil as
+PID 1; CMD supplies the default config path. Explicit arguments use the same
+native CLI and bounded config diagnostics, including missing/invalid files.
+No shell, writable startup setup or init process is required. Existing host
+networking, read-only mounts, capabilities, signals and stop watchdogs are retained.
+Operational inspection uses host tools and container logs. The smaller filesystem
+does not change serving buffers or establish a forwarding performance gain.
+
 ## Measurement and compile-time diagnostics
 
 The optional `-Ddataplane_metrics=true` build records syscall outcomes, pump exits,

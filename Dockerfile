@@ -8,7 +8,7 @@ ARG ZIGVEIL_CPU=baseline
 RUN set -eu; \
     test "$ZIG_VERSION" = 0.17.0; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
+    apt-get install -y --no-install-recommends binutils ca-certificates curl xz-utils; \
     rm -rf /var/lib/apt/lists/*; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
@@ -35,16 +35,24 @@ RUN set -eu; \
       arm64) target=aarch64-linux ;; \
       *) exit 1 ;; \
     esac; \
-    /opt/zig/zig build -Dtarget="$target" -Dcpu="$ZIGVEIL_CPU" -Doptimize="$PRODUCTION_MODE"
+    /opt/zig/zig build -Dtarget="$target" -Dcpu="$ZIGVEIL_CPU" -Doptimize="$PRODUCTION_MODE"; \
+    readelf -h zig-out/bin/zigveil > /tmp/elf-header; \
+    readelf -lW zig-out/bin/zigveil > /tmp/elf-program; \
+    readelf -dW zig-out/bin/zigveil > /tmp/elf-dynamic; \
+    grep -Eq 'Type:.*DYN' /tmp/elf-header; \
+    if grep -Eq '(^|[[:space:]])INTERP([[:space:]]|$)' /tmp/elf-program || \
+       grep -Fq '(NEEDED)' /tmp/elf-dynamic; then \
+      echo 'zigveil: scratch requires a PIE without an ELF interpreter or shared libraries' >&2; \
+      exit 1; \
+    fi
 
-FROM debian:trixie-slim
+FROM scratch
 LABEL org.opencontainers.image.source="https://github.com/XXcipherX/zigveil" \
       org.opencontainers.image.description="Bounded ClientHello routing and opaque TCP passthrough" \
       org.opencontainers.image.licenses="MIT"
 COPY --from=builder /build/zig-out/bin/zigveil /usr/local/bin/zigveil
-COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY examples/zigveil.json /usr/share/doc/zigveil/config.example.json
 WORKDIR /etc/zigveil
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/zigveil"]
 CMD ["/etc/zigveil/config.json"]

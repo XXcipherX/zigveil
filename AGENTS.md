@@ -79,6 +79,11 @@ or querying/waiting for runs. Retain smoke checks of built digests and platform
 validation before tags. Docker cache scopes must match architecture, CPU profile
 and production mode.
 
+The runtime is scratch with a direct exec-form daemon ENTRYPOINT and a default
+config CMD. Keep actual ELF PIE/no-INTERP/no-NEEDED checks in the builder, and
+native CLI, hosts/DNS, read-only forwarding and signal smoke checks. Do not add
+a shell or distribution libraries without a demonstrated runtime requirement.
+
 Honor the user's execution and publication constraints. Do not install tools,
 change system settings, publish artifacts or operate external deployments without
 task authorization. Repository instructions do not override an explicit user scope.

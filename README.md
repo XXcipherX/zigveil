@@ -220,8 +220,19 @@ docker run --rm --network host --read-only \
 
 For local image builds use `docker build -t zigveil .`; select safety checks with
 `--build-arg PRODUCTION_MODE=safe`. Both production modes build PIE binaries.
-The runtime contains the daemon and a small entrypoint, without a compiler.
-`--check`, `--help` and `--version` pass through without creating a config.
+The runtime uses `scratch`: only the daemon and documentation example are copied
+into it. Image builds verify that the actual PIE has neither an ELF interpreter
+nor shared-library dependencies. The daemon runs directly as PID 1, with
+`/etc/zigveil/config.json` as its default argument. A different config path,
+`--check`, `--help` or `--version` can be passed after the image name. A missing or
+invalid config produces the daemon's own error and a nonzero exit.
+
+Docker supplies `/etc/hosts` and `/etc/resolv.conf`; hostname startup resolution
+uses those files without libc/NSS. UTC logs need no timezone files, and opaque
+forwarding needs no CA bundle. There is no shell or diagnostic utility inside
+the image: use `docker logs`, native CLI checks and tools on the host. Removing
+the base distribution reduces image contents; it does not change TCP throughput
+or the configured buffer reservation.
 
 Before publishing, check that **Linux CI** succeeded for the source commit. Publish
 with **Actions → Publish Docker image → Run workflow**. Linux CI runs separately;

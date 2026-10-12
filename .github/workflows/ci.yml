@@ -175,8 +175,7 @@ jobs:
       - name: Shell syntax and lint
         run: |
           bash -n deploy/install_docker_compose.sh
-          sh -n docker-entrypoint.sh
-          shellcheck docker-entrypoint.sh deploy/install_docker_compose.sh
+          shellcheck deploy/install_docker_compose.sh
       - uses: docker/setup-buildx-action@v4
       - name: Build native image
         uses: docker/build-push-action@v7

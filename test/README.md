@@ -124,8 +124,12 @@ retry progress, the overall deadline and socket closure without scheduling races
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
 ```
 
-CI additionally builds native amd64/arm64 Docker images and checks the entrypoint,
-read-only configuration, byte preservation, bulk, FIN and container shutdown.
+CI additionally builds native scratch images for amd64/arm64 and amd64-v3 in
+fast/safe modes. Builder readelf checks require PIE without PT_INTERP or DT_NEEDED.
+Smoke checks the direct daemon ENTRYPOINT, default/explicit config arguments,
+help/version/check, missing/invalid config, hosts-backed forwarding and Docker's
+embedded DNS on an isolated network. Read-only mounts, byte preservation, bulk,
+FIN, active shutdown and restart remain covered; image size is printed in CI logs.
 The installer E2E uses an ephemeral local registry and systemd host to verify first
 install, actual traffic, refusal of insufficient fd capacity without disturbing a
 running service, config preservation and a real container update.

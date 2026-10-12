@@ -24,6 +24,12 @@ The publish workflow builds by digest on native Ubuntu 26.04 runners, verifies
 runtime behavior and runnable platforms, then publishes the selected/latest/SHA
 tags. Optional amd64-v3 images require compatible CPU flags. Use current action
 major tags.
+The runtime is scratch with a direct daemon ENTRYPOINT. Builder readelf checks
+must reject an interpreter or DT_NEEDED and preserve PIE. CMD supplies only the
+default config path; native CLI errors handle absent/invalid files. Docker mounts
+hosts/resolver files independently of the base image. Keep no shell, NSS, CA or
+timezone packages without an actual dependency. Inspect through host tools and
+docker logs; --check/help/version must work with a read-only filesystem.
 The operator checks successful Linux CI for the source commit before manually
 publishing. Publication builds directly; it does not repeat the Linux CI matrix,
 query existing runs or wait for their results. Keep the ordinary CI independent.

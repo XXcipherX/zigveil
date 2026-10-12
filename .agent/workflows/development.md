@@ -38,6 +38,10 @@ Full Linux validation explicitly selects amd64/arm64 baseline and amd64
 x86_64_v3, matching production image profiles. Pass the matrix CPU to every build,
 test, fuzz and optional benchmark-tool build. The default ordinary build is baseline.
 Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
+Scratch image builds additionally reject PT_INTERP and DT_NEEDED in the actual
+production ELF. Smoke covers direct CLI/default and explicit config arguments,
+missing/invalid config, Docker hosts and embedded DNS, read-only forwarding,
+active SIGTERM and restart. No shell is available in the runtime.
 Manual publication builds directly, while the operator checks that ordinary Linux
 CI succeeded for the source commit. Do not repeat the matrix or add run-status
 queries/waits to publication. Keep Docker cache scopes aligned by architecture,
