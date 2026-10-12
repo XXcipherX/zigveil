@@ -545,6 +545,20 @@ class Integration(unittest.TestCase):
             self.assertEqual(1, counts["fallback_routed"])
             self.assertEqual(1, counts["connect_failures"])
 
+    def test_optional_tcp_liveness_preserves_prefix_bulk_and_fin(self):
+        keepalive = {"idle_seconds": 180, "interval_seconds": 15, "probes": 5}
+        with Origin() as origin, Daemon(origin.address, tcp_keepalive=keepalive,
+                                        tcp_user_timeout_ms=120000) as proxy:
+            with proxy.connect() as client:
+                wire = hello(padding=24000) + os.urandom(256 * 1024)
+                client.sendall(wire)
+                client.shutdown(socket.SHUT_WR)
+                self.assertEqual(wire, all_bytes(client))
+            self.assert_clean_drain(proxy)
+            counts = proxy.snapshot()
+            self.assertEqual(len(wire), counts["bytes_client_to_backend"])
+            self.assertEqual(len(wire), counts["bytes_backend_to_client"])
+
     def test_client_half_close_then_backend_reply(self):
         received = []
 

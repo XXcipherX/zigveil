@@ -39,7 +39,7 @@ restart. The selected IPv4 (otherwise IPv6) still undergoes self-target checks.
 | `routed` / `fallback_routed` | All selected endpoints / fallback subset; selection precedes connect |
 | `invalid_client_hello` | Framing/name/inspection failure or partial EOF, including successfully forwarded fallback input |
 | `connect_failures` | Selected target IP, routing/firewall and backend listener |
-| `rejected` | Connection/staging capacity, descriptor resources or unsupported PROXY socket metadata |
+| `rejected` | Connection/staging capacity, socket setup/resources or unsupported PROXY socket metadata |
 | `accept_errors` | Pending connection errors or fd/memory pressure; only resource pressure backs off |
 | `timeouts` | Absolute hello/connect/prefix or established idle deadline |
 | `io_errors` | Aggregate fatal socket outcomes; inspect side/operation and cause below |
@@ -61,6 +61,11 @@ recv/send failed. Each event increments one
 operation and one cause, so sum each dimension separately against `io_errors`.
 `last_other_io_errno` records only the most recent unclassified numeric errno and
 must not be summed. `socket_timeouts` (ETIMEDOUT) differ from proxy deadlines.
+Explicit tcp_keepalive and tcp_user_timeout_ms apply to both socket sides; inspect
+their values when diagnosing a silent-peer/kernel timeout. An errno alone cannot
+identify which kernel mechanism fired. Probes/ACKs never refresh idle_timeout_ms
+or traffic totals. A client setup failure reports socket_setup with its errno and
+counts rejected before pool admission; outgoing setup failure counts connect_failures.
 Clean FIN and retry outcomes remain uncounted; ECONNRESET/EPIPE stay fatal observed
 socket outcomes. They appear in explicit totals/debug closes without routine INFO
 fields or warnings. Other live failures are grouped at most once per severity per second,

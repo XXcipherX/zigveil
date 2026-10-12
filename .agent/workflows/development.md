@@ -68,6 +68,10 @@ drain-window regression without millisecond timing or sleeps on the success path
 DNS changes preserve bounded startup/check completion with a silent resolver and
 continuous malformed or duplicate replies. Deterministic ready-I/O tests cover
 retry deadlines, the overall limit and socket cleanup without wall-clock timing.
+TCP option changes check old defaults, explicit bounds, invalid nested JSON before
+DNS, actual IPv4/IPv6 getsockopt values, preserved inherited settings, outbound
+and admitted socket paths, typed setup failure/fd cleanup and bulk/FIN with opt-ins.
+Do not wait for real keepalive expiry or add per-relay option calls.
 
 5. Review the full diff for unchecked arithmetic, stale slices, prefix offsets,
    backpressure masks, FIN ordering, fd/token reuse, deadline progress and teardown.

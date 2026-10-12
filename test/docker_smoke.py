@@ -59,7 +59,9 @@ def smoke(image):
         port = free_port()
         path = Path(directory) / "config.json"
         config = {"listen": f"127.0.0.1:{port}", "routes": [{"sni": "example.com", "backend": origin.address}],
-                  "max_connections": 4, "max_handshakes": 2, "stats_interval_ms": 0}
+                  "max_connections": 4, "max_handshakes": 2, "stats_interval_ms": 0,
+                  "tcp_keepalive": {"idle_seconds": 180, "interval_seconds": 15, "probes": 5},
+                  "tcp_user_timeout_ms": 120000}
         path.write_text(json.dumps(config), encoding="utf-8")
         mount = f"type=bind,source={path},target=/etc/zigveil/config.json,readonly"
         checked = command(*common, "--mount", mount, image, "--check", "/etc/zigveil/config.json")

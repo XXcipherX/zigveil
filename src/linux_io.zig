@@ -1,7 +1,8 @@
 //! Zig 0.17 Linux syscall boundary; no libc and no async runtime dependency.
 const std = @import("std");
 const linux = std.os.linux;
-const Address = @import("config.zig").Address;
+const config_mod = @import("config.zig");
+const Address = config_mod.Address;
 const Connect = @import("connection.zig").Connect;
 const Result = @import("io_result.zig").Result;
 const relay_pipe = @import("relay_pipe.zig");
@@ -11,6 +12,34 @@ pub const Io = struct {
     metrics: @import("metrics.zig").Metrics = .{},
     shared_pipes: if (relay_pipe.enabled) ?relay_pipe.Pair else void = if (relay_pipe.enabled) null else {},
     shared_attempted: if (relay_pipe.enabled) bool else void = if (relay_pipe.enabled) false else {},
+    tcp_keepalive: ?config_mod.TcpKeepalive = null,
+    tcp_user_timeout_ms: u32 = 0,
+
+    /// Once per admitted client or new backend, never in a relay callback.
+    pub fn configureSocket(self: *const Io, fd: i32) Result(void) {
+        switch (optionResult(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1)) {
+            .ok => {},
+            .err => |err| return .{ .err = err },
+        }
+        if (self.tcp_keepalive) |keepalive| {
+            const options = [_]struct { name: u32, value: u32 }{
+                .{ .name = linux.TCP.KEEPIDLE, .value = keepalive.idle_seconds },
+                .{ .name = linux.TCP.KEEPINTVL, .value = keepalive.interval_seconds },
+                .{ .name = linux.TCP.KEEPCNT, .value = keepalive.probes },
+            };
+            for (options) |opt| switch (optionResult(fd, linux.IPPROTO.TCP, opt.name, @intCast(opt.value))) {
+                .ok => {},
+                .err => |err| return .{ .err = err },
+            };
+            switch (optionResult(fd, linux.SOL.SOCKET, linux.SO.KEEPALIVE, 1)) {
+                .ok => {},
+                .err => |err| return .{ .err = err },
+            }
+        }
+        if (self.tcp_user_timeout_ms != 0)
+            return optionResult(fd, linux.IPPROTO.TCP, linux.TCP.USER_TIMEOUT, @intCast(self.tcp_user_timeout_ms));
+        return .{ .ok = {} };
+    }
 
     pub fn recv(self: *Io, fd: i32, bytes: []u8) Result(usize) {
         while (true) {
@@ -50,7 +79,7 @@ pub const Io = struct {
             self.metrics.add("close", 1);
             close(fd);
         };
-        switch (optionResult(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1)) {
+        switch (self.configureSocket(fd)) {
             .ok => {},
             .err => |err| return .{ .err = err },
         }
@@ -457,4 +486,84 @@ test "Linux send after local SHUT_WR returns typed EPIPE without SIGPIPE" {
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(linux.E.AGAIN, io.recv(fds[0], &byte).err);
     try std.testing.expectEqual(linux.E.BADF, io.recv(-1, &byte).err);
+}
+
+fn testIntegerOption(fd: i32, level: i32, name: u32) !i32 {
+    var value: i32 = undefined;
+    var len: linux.socklen_t = @sizeOf(i32);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.getsockopt(fd, level, name, @ptrCast(&value), &len)));
+    try std.testing.expectEqual(@as(linux.socklen_t, @sizeOf(i32)), len);
+    return value;
+}
+
+test "Linux TCP setup applies each opt-in independently on IPv4 and IPv6" {
+    const keepalive: config_mod.TcpKeepalive = .{ .idle_seconds = 180, .interval_seconds = 15, .probes = 5 };
+    const cases = [_]struct { keepalive: ?config_mod.TcpKeepalive, timeout: u32 }{
+        .{ .keepalive = null, .timeout = 0 },
+        .{ .keepalive = keepalive, .timeout = 0 },
+        .{ .keepalive = null, .timeout = 120000 },
+        .{ .keepalive = keepalive, .timeout = 120000 },
+    };
+    for ([_]u16{ linux.AF.INET, linux.AF.INET6 }) |family| for (cases) |case| {
+        const fd = try socket(family);
+        defer close(fd);
+        const io: Io = .{ .tcp_keepalive = case.keepalive, .tcp_user_timeout_ms = case.timeout };
+        try std.testing.expectEqual(.ok, std.meta.activeTag(io.configureSocket(fd)));
+        try std.testing.expectEqual(@as(i32, 1), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY));
+        try std.testing.expectEqual(@as(i32, @intFromBool(case.keepalive != null)), try testIntegerOption(fd, linux.SOL.SOCKET, linux.SO.KEEPALIVE));
+        try std.testing.expectEqual(@as(i32, @intCast(case.timeout)), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.USER_TIMEOUT));
+        if (case.keepalive != null) {
+            try std.testing.expectEqual(@as(i32, 180), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPIDLE));
+            try std.testing.expectEqual(@as(i32, 15), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPINTVL));
+            try std.testing.expectEqual(@as(i32, 5), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPCNT));
+        }
+    };
+}
+
+test "default TCP setup leaves inherited keepalive and user timeout untouched" {
+    const fd = try socket(linux.AF.INET);
+    defer close(fd);
+    try option(fd, linux.IPPROTO.TCP, linux.TCP.KEEPIDLE, 321);
+    try option(fd, linux.IPPROTO.TCP, linux.TCP.KEEPINTVL, 17);
+    try option(fd, linux.IPPROTO.TCP, linux.TCP.KEEPCNT, 7);
+    try option(fd, linux.SOL.SOCKET, linux.SO.KEEPALIVE, 1);
+    try option(fd, linux.IPPROTO.TCP, linux.TCP.USER_TIMEOUT, 234567);
+    const io: Io = .{};
+    try std.testing.expectEqual(.ok, std.meta.activeTag(io.configureSocket(fd)));
+    try std.testing.expectEqual(@as(i32, 1), try testIntegerOption(fd, linux.SOL.SOCKET, linux.SO.KEEPALIVE));
+    try std.testing.expectEqual(@as(i32, 321), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPIDLE));
+    try std.testing.expectEqual(@as(i32, 17), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPINTVL));
+    try std.testing.expectEqual(@as(i32, 7), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.KEEPCNT));
+    try std.testing.expectEqual(@as(i32, 234567), try testIntegerOption(fd, linux.IPPROTO.TCP, linux.TCP.USER_TIMEOUT));
+    try std.testing.expectEqual(linux.E.BADF, io.configureSocket(-1).err);
+}
+
+test "backend sockets are configured before connect and failed setup releases its fd" {
+    for ([_][]const u8{ "127.0.0.1:0", "[::1]:0" }) |literal| {
+        const listener = try listen(try Address.parseLiteral(literal), false);
+        defer close(listener);
+        var bound: SockAddress = .{ .storage = std.mem.zeroes(linux.sockaddr.storage), .len = @sizeOf(linux.sockaddr.storage) };
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.getsockname(listener, @ptrCast(&bound.storage), &bound.len)));
+        const destination = bound.decode().?;
+        var io: Io = .{ .tcp_keepalive = .{ .idle_seconds = 180, .interval_seconds = 15, .probes = 5 }, .tcp_user_timeout_ms = 120000 };
+        const connected = io.startConnect(destination).ok;
+        defer close(connected.fd);
+        try std.testing.expectEqual(@as(i32, 1), try testIntegerOption(connected.fd, linux.SOL.SOCKET, linux.SO.KEEPALIVE));
+        try std.testing.expectEqual(@as(i32, 180), try testIntegerOption(connected.fd, linux.IPPROTO.TCP, linux.TCP.KEEPIDLE));
+        try std.testing.expectEqual(@as(i32, 15), try testIntegerOption(connected.fd, linux.IPPROTO.TCP, linux.TCP.KEEPINTVL));
+        try std.testing.expectEqual(@as(i32, 5), try testIntegerOption(connected.fd, linux.IPPROTO.TCP, linux.TCP.KEEPCNT));
+        try std.testing.expectEqual(@as(i32, 120000), try testIntegerOption(connected.fd, linux.IPPROTO.TCP, linux.TCP.USER_TIMEOUT));
+        const next_fd = try socket(bound.storage.family);
+        close(next_fd);
+        // Bypass Config only to exercise the kernel's EINVAL and ownership path.
+        var failed: Io = .{ .tcp_keepalive = .{ .idle_seconds = 0, .interval_seconds = 15, .probes = 5 } };
+        try std.testing.expectEqual(linux.E.INVAL, failed.startConnect(destination).err);
+        const probe = try socket(bound.storage.family);
+        defer close(probe);
+        try std.testing.expectEqual(next_fd, probe);
+        if (@import("metrics.zig").enabled) {
+            try std.testing.expectEqual(@as(u64, 1), failed.metrics.get("close"));
+            try std.testing.expectEqual(@as(u64, 0), failed.metrics.get("connect"));
+        }
+    }
 }

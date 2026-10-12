@@ -66,6 +66,15 @@ Zig 0.17 `@bitCast` uses logical bits, independent of byte order. Use
 The remaining signed/unsigned scalar bitcasts only encode negative syscall errno
 in test fixtures. Audit generated code as well as semantics after compiler changes.
 Socket creation and accept4 include NONBLOCK and CLOEXEC atomically.
+TCP keepalive uses SO_KEEPALIVE at SOL.SOCKET and KEEPIDLE/KEEPINTVL/KEEPCNT at
+IPPROTO.TCP. Linux accepts 1..32767 seconds and 1..127 probes; USER_TIMEOUT takes
+0..INT_MAX milliseconds. Validate before narrowing to i32. A null keepalive or
+zero user timeout performs no respective setsockopt and preserves inherited values.
+Set explicit probe parameters before enabling keepalive. Keep setup errors typed;
+do not continue after partial configuration. USER_TIMEOUT governs retransmit and
+zero-window stalls and overrides the keepalive failure threshold after a probe,
+without changing probe cadence. Current SYN retry code may also consult it;
+retain absolute connect/prefix deadlines. Kernel probes do not refresh idle I/O.
 EINTR retries I/O, not Linux close. MSG_NOSIGNAL makes EPIPE an ordinary error.
 Splice has no MSG_NOSIGNAL flag: Server scopes SIGPIPE ignore/restore while the
 shared path is enabled. Use nonblocking pipe/socket ends and null splice offsets.

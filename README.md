@@ -140,10 +140,50 @@ NAT and indirect routing loops require operator checks; interfaces are not disco
 | `hello_timeout_ms` | `5000` | Absolute pre-routing deadline; range 250..60000 |
 | `connect_timeout_ms` | `5000` | Separate absolute connect and prefix-send deadlines |
 | `idle_timeout_ms` | `300000` | Successful-I/O idle deadline; `0` disables it |
+| `tcp_keepalive` | `null` | Optional object with `idle_seconds`, `interval_seconds`, `probes`; enable TCP keepalive on both socket sides |
+| `tcp_user_timeout_ms` | `0` | Optional Linux TCP retry/zero-window limit; range 0..2147483647 ms; `0` leaves kernel settings unchanged |
 | `stats_interval_ms` | `30000` | Traffic summary interval; `0` disables summaries, while live warnings remain enabled |
 | `log_level` | `"info"` | `error`, `warn`, `info`, `debug` or `none` |
 | `log_format` | `"text"` | Readable `text` or machine-readable `json` |
 | `reuse_port` | `false` | Allow independently launched processes to share the listener |
+
+TCP liveness options are independent and opt in. Omitting them preserves previous
+behavior without extra socket-option calls. Both apply once to admitted client
+sockets and backend sockets before connect; the listener is unchanged. A failed
+setup closes that socket and reports the exact errno, rather than continuing with
+partially applied settings.
+
+An explicit example of optional fields to add to your config:
+
+```json
+{
+  "tcp_keepalive": { "idle_seconds": 180, "interval_seconds": 15, "probes": 5 },
+  "tcp_user_timeout_ms": 120000
+}
+```
+
+All three keepalive fields are required when the object is present. Idle and
+interval values are seconds in 1..32767; probes is 1..127. Keepalive checks a
+quiet peer with kernel probes once the idle period expires; queued/unacknowledged
+data uses TCP retransmission instead. It can detect silent disconnection when
+application idle expiry is disabled or long, but sends extra packets. Short
+settings can interrupt a healthy connection during a temporary outage.
+
+`tcp_user_timeout_ms` limits unacknowledged transmitted data and kernel-buffered
+data stalled by a zero window. It does not bound unsent data in Zigveil's rings
+or detect a completely quiet peer by itself. With keepalive it replaces the
+probe-count failure criterion: Linux evaluates elapsed idle time after at least
+one unanswered probe, without changing probe cadence. These fields are not a
+universal failure-time formula or a recommended preset for every network.
+
+The existing hello/connect/prefix deadlines remain in force; some Linux SYN
+retry paths also consult user timeout, so the kernel may fail a connect earlier.
+`idle_timeout_ms` still measures successful stream I/O. Probes and ACKs do not
+update that activity or traffic totals, and a healthy quiet connection can still
+reach its configured application idle deadline. Kernel ETIMEDOUT follows ordinary
+connect/I/O errno accounting; the `timeouts` counter tracks application deadlines.
+See [Linux TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html) and the
+[kernel timers](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_timer.c).
 
 Fallback is selected once, before connecting. It uses the same prefix and relay
 engine as a known SNI route. The parser's limits constrain inspection rather than

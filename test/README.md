@@ -124,6 +124,13 @@ retry progress, the overall deadline and socket closure without scheduling races
 sudo python3 test/dns_integration.py --binary zig-out/bin/zigveil
 ```
 
+TCP liveness tests validate old/explicit defaults, numeric bounds
+and nested fields before DNS. Linux unit tests read actual IPv4/IPv6 options,
+check inherited settings, outbound setup/released fds and admission rejection with
+unchanged pools/counters and exact errno. Socket integration and Docker smoke
+forward a padded prefix and bulk data through opt-in settings with clean FINs;
+none of these tests waits for keepalive expiry.
+
 CI additionally builds native scratch images for amd64/arm64 and amd64-v3 in
 fast/safe modes. Builder readelf checks require PIE without PT_INTERP or DT_NEEDED.
 Smoke checks the direct daemon ENTRYPOINT, default/explicit config arguments,

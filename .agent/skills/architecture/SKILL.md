@@ -29,6 +29,13 @@ owned `Name` values cannot refer into a recycled staging buffer.
 interest and performs teardown. `pool.zig` retains generations between uses;
 reinitializing an occupied connection must never reset that metadata.
 
+Io also holds process-level optional TCP settings. configureSocket applies NODELAY
+and explicit keepalive/user timeout once on admission or before backend connect;
+defaults leave those kernel options untouched. Failed client setup closes before
+pool acquisition and counts rejected with errno context; outgoing failure closes
+before fd transfer and remains a connect failure. Keep stream deadlines and byte
+accounting independent of kernel probes/ACKs; no relay-event socket setup is allowed.
+
 The engine's I/O type seam exists for `connection_test.zig`. It is not an async
 runtime or a generic event-loop backend. Avoid dependencies from parser/buffer/pool
 modules back into Server.

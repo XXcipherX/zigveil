@@ -5,6 +5,12 @@ const logging = @import("log.zig");
 pub const Address = std.Io.net.IpAddress;
 pub const hello_bytes = @import("client_hello.zig").max_wire_bytes;
 
+pub const TcpKeepalive = struct {
+    idle_seconds: u32,
+    interval_seconds: u32,
+    probes: u32,
+};
+
 pub const Raw = struct {
     listen: []const u8,
     routes: []const struct { sni: []const u8, backend: []const u8 },
@@ -16,6 +22,8 @@ pub const Raw = struct {
     hello_timeout_ms: u32 = 5000,
     connect_timeout_ms: u32 = 5000,
     idle_timeout_ms: u32 = 300000,
+    tcp_keepalive: ?TcpKeepalive = null,
+    tcp_user_timeout_ms: u32 = 0,
     stats_interval_ms: u32 = 30000,
     log_level: logging.Level = .info,
     log_format: logging.Format = .text,
@@ -49,6 +57,12 @@ pub const Config = struct {
         if (raw.hello_timeout_ms < 250 or raw.hello_timeout_ms > 60000) return error.HelloTimeoutMustBe250To60000Ms;
         if (raw.connect_timeout_ms < 250 or raw.connect_timeout_ms > 60000) return error.ConnectTimeoutMustBe250To60000Ms;
         if (raw.idle_timeout_ms != 0 and raw.idle_timeout_ms < 250) return error.IdleTimeoutMustBeZeroOrAtLeast250Ms;
+        if (raw.tcp_keepalive) |keepalive| {
+            if (keepalive.idle_seconds == 0 or keepalive.idle_seconds > 32767 or keepalive.interval_seconds == 0 or keepalive.interval_seconds > 32767)
+                return error.TcpKeepaliveSecondsMustBe1To32767;
+            if (keepalive.probes == 0 or keepalive.probes > 127) return error.TcpKeepaliveProbesMustBe1To127;
+        }
+        if (raw.tcp_user_timeout_ms > 2147483647) return error.TcpUserTimeoutMustBeZeroTo2147483647Ms;
         if (raw.stats_interval_ms != 0 and raw.stats_interval_ms < 1000) return error.StatsIntervalMustBeZeroOrAtLeast1000Ms;
         if (raw.routes.len > 1024 or (raw.routes.len == 0 and raw.fallback == null)) return error.NeedOneTo1024RoutesOrFallback;
         if (bufferBytes(raw) > 1024 * 1024 * 1024) return error.BufferReservationExceeds1GiB;
@@ -358,4 +372,58 @@ test "DNS failure propagates and resolved IPv6 and alternate ports stay valid" {
         defer config.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(u16, 9443), config.fallback.?.getPort());
     }
+}
+
+test "TCP options preserve old defaults and accept explicit Linux bounds" {
+    for ([_][]const u8{ "", ",\"tcp_keepalive\":null,\"tcp_user_timeout_ms\":0" }) |settings| {
+        var storage: [512]u8 = undefined;
+        const input = try std.mem.print(&storage, "{{\"listen\":\"127.0.0.1:8443\",\"routes\":[],\"fallback\":\"127.0.0.1:9443\"{s}}}", .{settings});
+        var config = try Config.parse(std.testing.allocator, input);
+        defer config.deinit(std.testing.allocator);
+        try std.testing.expect(config.raw.value.tcp_keepalive == null);
+        try std.testing.expectEqual(@as(u32, 0), config.raw.value.tcp_user_timeout_ms);
+    }
+    const cases = [_]struct { keepalive: TcpKeepalive, timeout: u32 }{
+        .{ .keepalive = .{ .idle_seconds = 1, .interval_seconds = 1, .probes = 1 }, .timeout = 1 },
+        .{ .keepalive = .{ .idle_seconds = 32767, .interval_seconds = 32767, .probes = 127 }, .timeout = 2147483647 },
+    };
+    for (cases) |case| {
+        var storage: [512]u8 = undefined;
+        const input = try std.mem.print(&storage, "{{\"listen\":\"127.0.0.1:8443\",\"routes\":[],\"fallback\":\"127.0.0.1:9443\",\"tcp_keepalive\":{{\"idle_seconds\":{d},\"interval_seconds\":{d},\"probes\":{d}}},\"tcp_user_timeout_ms\":{d}}}", .{ case.keepalive.idle_seconds, case.keepalive.interval_seconds, case.keepalive.probes, case.timeout });
+        var config = try Config.parse(std.testing.allocator, input);
+        defer config.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.keepalive, config.raw.value.tcp_keepalive.?);
+        try std.testing.expectEqual(case.timeout, config.raw.value.tcp_user_timeout_ms);
+    }
+}
+
+test "invalid TCP values and object fields fail before hostname resolution" {
+    const cases = [_][]const u8{
+        "\"tcp_keepalive\":{\"idle_seconds\":0,\"interval_seconds\":1,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":32768,\"interval_seconds\":1,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":0,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":32768,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":1,\"probes\":0}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":1,\"probes\":128}",
+        "\"tcp_keepalive\":{\"idle_seconds\":-1,\"interval_seconds\":1,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":4294967296,\"interval_seconds\":1,\"probes\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":1}",
+        "\"tcp_keepalive\":{\"idle_seconds\":1,\"interval_seconds\":1,\"probes\":1,\"typo\":1}",
+        "\"tcp_keepalive\":true",
+        "\"tcp_user_timeout_ms\":-1",
+        "\"tcp_user_timeout_ms\":2147483648",
+        "\"tcp_user_timeout_ms\":4294967296",
+        "\"tcp_user_timeout_ms\":null",
+    };
+    var resolver: TestResolver = .{ .target = try Address.parseLiteral("203.0.113.10:1") };
+    for (cases) |settings| {
+        var storage: [512]u8 = undefined;
+        const input = try std.mem.print(&storage, "{{\"listen\":\"127.0.0.1:8443\",\"routes\":[],\"fallback\":\"backend.test:9443\",{s}}}", .{settings});
+        if (Config.parseWithResolver(std.testing.allocator, input, &resolver)) |value| {
+            var unexpected = value;
+            unexpected.deinit(std.testing.allocator);
+            return error.ExpectedConfigRejection;
+        } else |_| {}
+    }
+    try std.testing.expectEqual(@as(usize, 0), resolver.calls);
 }

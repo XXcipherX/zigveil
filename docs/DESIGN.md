@@ -461,6 +461,40 @@ Compose installer readiness checks an owned LISTEN socket through the container'
 host PID, rather than requiring a startup log at info. Explicit --check diagnostics
 stay visible even with log_level none; this preserves actionable preflight failures.
 
+## Optional TCP liveness
+
+Raw config has a nullable tcp_keepalive object with explicit idle_seconds,
+interval_seconds and probes, plus a separate tcp_user_timeout_ms defaulting to
+zero. Validation precedes DNS/bind: keepalive seconds are 1..32767, probes 1..127,
+and user timeout 0..2147483647 ms, matching Linux's positive int option bounds.
+No partial object, unknown nested field or numeric overflow is accepted.
+
+Io stores these settings once per process. Its configureSocket retains NODELAY,
+sets the keepalive parameters before enabling SO_KEEPALIVE, and sets USER_TIMEOUT
+only for a nonzero value. Defaults perform only the previous NODELAY call and do
+not overwrite inherited/kernel options. Server applies setup after capacity
+checks but before acquiring a slot; outgoing setup runs before connect. A client
+setup failure closes the fd, increments rejected and warns with client/errno
+context. Outgoing setup returns its exact errno as a connect failure and closes
+the untransferred fd once. No relay-event calls, allocations, connection policy
+fields, added timers or counter schema changes are needed.
+
+Keepalive operates on idle TCP peers without outstanding transmit work. User
+timeout limits unacknowledged data and zero-window kernel queue stalls, including
+TCP closing states; a quiet peer alone does not trigger it. With keepalive, Linux
+checks elapsed idle time after an unanswered probe against user timeout instead
+of the probe count. Neither changes the keepalive cadence. Current SYN retry
+paths can also consult user timeout; it never replaces the proxy connect limit.
+Kernel probes/ACKs do not pass through recv/send and do not refresh stream activity
+or byte counters. All application phase/idle deadlines remain independent. Kernel
+ETIMEDOUT uses existing typed connect or I/O accounting, not application timeouts.
+Aggressive opt-in settings can abort healthy but temporarily disconnected peers;
+no preset is enabled or presented as universally best.
+
+Bounds and timing follow [tcp.c](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp.c),
+[tcp.h](https://github.com/torvalds/linux/blob/master/include/net/tcp.h) and
+[tcp_timer.c](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_timer.c).
+
 ## Minimal container runtime
 
 The production executable does not link libc; its Linux syscall boundary and

@@ -84,7 +84,7 @@ pub const Server = struct {
         errdefer if (relay_pipe.enabled) {
             _ = linux.sigaction(.PIPE, &previous_sigpipe, null);
         };
-        var io: net.Io = .{};
+        var io: net.Io = .{ .tcp_keepalive = raw.tcp_keepalive, .tcp_user_timeout_ms = raw.tcp_user_timeout_ms };
         try control(epoll, linux.EPOLL.CTL_ADD, listener, linux.EPOLL.IN, 0, &io.metrics);
         try control(epoll, linux.EPOLL.CTL_ADD, signals, linux.EPOLL.IN, 1, &io.metrics);
         return .{
@@ -231,13 +231,16 @@ pub const Server = struct {
                 net.close(fd);
                 continue;
             }
-            net.option(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, 1) catch {
-                self.counts.rejected +%= 1;
-                self.log.warning(.socket_setup, .{ .phase = .accept });
-                self.io.metrics.add("close", 1);
-                net.close(fd);
-                continue;
-            };
+            switch (self.io.configureSocket(fd)) {
+                .ok => {},
+                .err => |err| {
+                    self.counts.rejected +%= 1;
+                    self.log.warning(.socket_setup, .{ .phase = .accept, .side = .client, .errno = err });
+                    self.io.metrics.add("close", 1);
+                    net.close(fd);
+                    continue;
+                },
+            }
             const index = self.pool.acquire().?;
             const staging = self.stages.acquire().?;
             const stage_bytes = Config.stageBytes(self.config.raw.value);
@@ -390,6 +393,74 @@ fn control(epoll: i32, operation: u32, fd: i32, mask: u32, token: u64, diagnosti
     }
     var event: linux.epoll_event = .{ .events = mask, .data = .{ .u64 = token } };
     if (linux.errno(linux.epoll_ctl(epoll, operation, fd, if (operation == linux.EPOLL.CTL_DEL) null else &event)) != .SUCCESS) return error.EpollControlFailed;
+}
+
+test "admission configures accepted TCP sockets and rejects setup failure before taking a slot" {
+    var config = try Config.parse(std.testing.allocator,
+        \\{"listen":"127.0.0.1:9443","routes":[],"fallback":"127.0.0.1:9444",
+        \\ "max_connections":2,"max_handshakes":2,"relay_buffer_bytes":4096,"stats_interval_ms":0,
+        \\ "tcp_keepalive":{"idle_seconds":180,"interval_seconds":15,"probes":5},"tcp_user_timeout_ms":120000}
+    );
+    defer config.deinit(std.testing.allocator);
+    config.listen.ip4.port = 0;
+    var log: logging.Logger = .{ .level = .warn };
+    var server = try Server.init(std.testing.allocator, &config, &log);
+    defer server.deinit();
+    var bound: linux.sockaddr.in = undefined;
+    var length: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.getsockname(server.listener, @ptrCast(&bound), &length)));
+    var endpoint = config.listen;
+    endpoint.ip4.port = std.mem.bigToNative(u16, bound.port);
+    var clients: net.Io = .{};
+    const first = clients.startConnect(endpoint).ok;
+    defer net.close(first.fd);
+    var ready = [_]linux.pollfd{.{ .fd = server.listener, .events = linux.POLL.IN }};
+    try std.testing.expectEqual(@as(usize, 1), linux.poll(&ready, 1, 1000));
+    try server.admit(0);
+    try std.testing.expectEqual(@as(u64, 1), server.counts.active);
+    var accepted: ?i32 = null;
+    for (server.pool.entries, 0..) |entry, index| if (entry.used) {
+        accepted = server.slots[index].conn.client;
+        break;
+    };
+    const options = [_]struct { level: i32, name: u32, expected: i32 }{
+        .{ .level = linux.SOL.SOCKET, .name = linux.SO.KEEPALIVE, .expected = 1 },
+        .{ .level = linux.IPPROTO.TCP, .name = linux.TCP.NODELAY, .expected = 1 },
+        .{ .level = linux.IPPROTO.TCP, .name = linux.TCP.KEEPIDLE, .expected = 180 },
+        .{ .level = linux.IPPROTO.TCP, .name = linux.TCP.KEEPINTVL, .expected = 15 },
+        .{ .level = linux.IPPROTO.TCP, .name = linux.TCP.KEEPCNT, .expected = 5 },
+        .{ .level = linux.IPPROTO.TCP, .name = linux.TCP.USER_TIMEOUT, .expected = 120000 },
+    };
+    for (options) |opt| {
+        var value: i32 = undefined;
+        var len: linux.socklen_t = @sizeOf(i32);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.getsockopt(accepted.?, opt.level, opt.name, @ptrCast(&value), &len)));
+        try std.testing.expectEqual(@as(linux.socklen_t, @sizeOf(i32)), len);
+        try std.testing.expectEqual(opt.expected, value);
+    }
+    const free_slot = server.pool.free;
+    const free_stage = server.stages.free;
+    // Bypass validated config to exercise a real setsockopt failure on admission.
+    server.io.tcp_keepalive.?.idle_seconds = 0;
+    const second = clients.startConnect(endpoint).ok;
+    defer net.close(second.fd);
+    try std.testing.expectEqual(@as(usize, 1), linux.poll(&ready, 1, 1000));
+    try server.admit(1);
+    try std.testing.expectEqual(@as(u64, 2), server.counts.accepted);
+    try std.testing.expectEqual(@as(u64, 1), server.counts.rejected);
+    try std.testing.expectEqual(@as(u64, 1), server.counts.active);
+    inline for (.{ "io_errors", "accept_errors", "connect_failures", "closed" }) |field|
+        try std.testing.expectEqual(@as(u64, 0), @field(server.counts, field));
+    try std.testing.expectEqual(free_slot, server.pool.free);
+    try std.testing.expectEqual(free_stage, server.stages.free);
+    try std.testing.expectEqual(logging.Warning.socket_setup, log.last_warning.?.kind);
+    try std.testing.expectEqual(@as(?linux.E, .INVAL), log.last_warning.?.context.errno);
+    try std.testing.expectEqual(@as(?@import("io_result.zig").Side, .client), log.last_warning.?.context.side);
+    ready[0] = .{ .fd = second.fd, .events = linux.POLL.IN };
+    try std.testing.expectEqual(@as(usize, 1), linux.poll(&ready, 1, 1000));
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), clients.recv(second.fd, &byte).ok);
+    if (metrics.enabled) try std.testing.expectEqual(@as(u64, 1), server.io.metrics.get("close"));
 }
 
 test "stop signals close the listener once and release every connection phase" {

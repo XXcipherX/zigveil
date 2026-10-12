@@ -53,6 +53,10 @@ Read the relevant project guides before changing behavior:
     Cancel timers and return staging/slots before final totals; Io alone closes
     shared pipes in Server.deinit. Repeated stop signals are idempotent. Deployment
     stop timeouts are watchdog limits, never a mandatory delay.
+17. TCP keepalive/user timeout are explicit independent opt-ins, configured once
+    on admitted clients and new backends before connect. Defaults add no calls or
+    overwrite inherited options. Validate Linux int bounds before DNS/bind; preserve
+    setup errno/fd ownership. Probes/ACKs never count as stream I/O or refresh idle.
 
 ## Change discipline
 
