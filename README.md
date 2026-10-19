@@ -475,8 +475,9 @@ Periodic text summaries show active connections, average forwarding rates and
 cumulative traffic since this process started. `up` means client → backend;
 `down` means backend → client, summed across all connections. Totals count successful
 forwarded bytes, including the original hello and excluding a generated PROXY header.
-Rates use the actual elapsed monotonic time, shown in `avg(...)`; the default interval
-is 30 seconds. Units use B/KiB/MiB/GiB and two decimal places for scaled totals and
+Rates use the actual elapsed monotonic time. The `avg(...)` label rounds the window
+to whole seconds (at least 1s), so small scheduling variations still show `avg(30s)`
+at the default interval. Units use B/KiB/MiB/GiB and two decimal places for scaled totals and
 rates. A restart resets totals. Unchanged traffic and active counts produce no
 repeated text summary, including when established connections remain idle. For example:
 

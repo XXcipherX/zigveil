@@ -227,8 +227,10 @@ pub const Logger = struct {
         self.previous_activity_ms = now;
         if (!self.enabled(.info) or !changed) return;
         if (self.format == .json) return self.jsonSnapshot(counts);
-        self.forceMessage(.info, "activity", "stats | active={d} | avg({f}s): up={f} down={f} | total: up={f} down={f}", .{
-            counts.active,                                                          Seconds{ .ms = elapsed },
+        // Round only the label; byte rates retain the exact elapsed milliseconds.
+        const window_seconds = @max(1, elapsed / 1000 + @intFromBool(elapsed % 1000 >= 500));
+        self.forceMessage(.info, "activity", "stats | active={d} | avg({d}s): up={f} down={f} | total: up={f} down={f}", .{
+            counts.active,                                                          window_seconds,
             Rate{ .bytes = uploaded, .elapsed_ms = elapsed },                       Rate{ .bytes = downloaded, .elapsed_ms = elapsed },
             Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true }, Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
         });
@@ -552,7 +554,7 @@ test "level changes flush visible pending failures without replaying muted count
     for (0..3) |_| logger.warning(.connect_failures, .{ .phase = .connect });
     logger.cycle(10, &counts); // info -> debug: preserve the current interval.
     try std.testing.expect(std.mem.find(u8, capture.slice(), "connect_failures=3") != null);
-    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=0 | avg(0.010s)") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=0 | avg(1s)") != null);
     logger.cycle(20, &counts); // debug -> none
     counts.accepted += 7;
     counts.closed += 7;
@@ -581,7 +583,7 @@ test "traffic totals accumulate and rates use actual elapsed time without repeat
     logger.periodic(100, &counts); // No invented rate or lost data at zero elapsed.
     try std.testing.expectEqual(@as(usize, 0), capture.len);
     logger.periodic(12600, &counts);
-    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=1 | avg(12.500s): up=1.00KiB/s down=2.00KiB/s | total: up=12.50KiB down=25.00KiB") != null);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "stats | active=1 | avg(13s): up=1.00KiB/s down=2.00KiB/s | total: up=12.50KiB down=25.00KiB") != null);
     const first = capture.len;
     counts.bytes_client_to_backend += 5120;
     counts.bytes_backend_to_client += 10240;
@@ -596,6 +598,15 @@ test "traffic totals accumulate and rates use actual elapsed time without repeat
     try std.testing.expectEqual(stable, capture.len);
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("0.25B/s", try std.mem.print(&buffer, "{f}", .{Rate{ .bytes = 1, .elapsed_ms = 4000 }}));
+    for ([_]u64{ 29999, 30000, 30001, 30002, 30003 }) |elapsed| {
+        capture.len = 0;
+        counts = .{};
+        logger.begin(0, &counts);
+        counts.bytes_client_to_backend = elapsed;
+        counts.bytes_backend_to_client = elapsed * 2;
+        logger.periodic(elapsed, &counts);
+        try std.testing.expect(std.mem.find(u8, capture.slice(), "avg(30s): up=1000.00B/s down=1.95KiB/s") != null);
+    }
 }
 
 test "periodic JSON preserves every original machine counter and exact bytes" {

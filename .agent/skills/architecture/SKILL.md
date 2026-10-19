@@ -132,7 +132,9 @@ Levels/formats come from config; SIGUSR2 changes all owners through an acknowled
 absolute-level command. The cold Writer mutex covers complete output lines only.
 Periodic text INFO shows
 cumulative up/down totals and rates from wrapping byte deltas over actual monotonic
-elapsed time. Suppress unchanged traffic/active gauges, even with idle connections.
+elapsed time. Round only the avg label to whole seconds (minimum 1s); retain actual
+milliseconds for rate denominators and DEBUG lifetimes. Suppress unchanged
+traffic/active gauges, even with idle connections.
 Only the two forwarded-byte counters need periodic deltas. Retain the complete
 previous snapshot for JSON change detection; JSON stats retain every original
 counter. Warning/error events enter fixed batches

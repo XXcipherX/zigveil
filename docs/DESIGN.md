@@ -463,7 +463,9 @@ Default text output has UTC timestamps, aligned severity labels and human-readab
 byte volumes. Text INFO contains the current active gauge, cumulative original-stream
 up/down bytes since startup, and average up/down rates. Rate numerators use wrapping
 byte-counter differences; denominators use actual monotonic elapsed milliseconds,
-including when the event loop wakes late. Scaled totals and rates have two decimals.
+including when the event loop wakes late. Only the avg label rounds to whole seconds,
+with a minimum of 1s; DEBUG connection lifetimes retain millisecond precision.
+Scaled totals and rates have two decimals.
 Unchanged traffic/active gauges suppress the line even with live idle connections.
 JSON periodic stats still observe changes in all original counters.
 
