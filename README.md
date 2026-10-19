@@ -396,7 +396,7 @@ read interest, letting TCP apply backpressure. Empty rings reset their head so t
 next read can use one contiguous span.
 
 After an opaque read of at least 16 KiB, that direction can use nonblocking
-`splice` through two pipes shared by the serving process. Each callback returns the pipes empty:
+`splice` through two pipes shared by that worker's connections. Each callback returns the pipes empty:
 blocked or partial output is saved in that connection's bounded ring. The
 original prefix stays ordered, and connections never share pending bytes.
 Each direction selects its mode independently. After 32 consecutive splice reads
@@ -545,8 +545,9 @@ backends you intend to make reachable, and ensure a backend does not point back 
 the proxy. ECH exposes only an outer name; encrypted inner SNI cannot be routed.
 No early TLS application bytes are decrypted or treated specially. Monotonic
 deadlines are tracked in a bounded indexed queue, with event-batch scheduling delay.
-Keepalive and custom socket-buffer tuning are left to OS defaults; `TCP_NODELAY`
-is enabled to avoid holding small forwarding writes.
+Keepalive and TCP user timeout are explicit opt-ins; see [configuration](#configure-and-run).
+Omitted options preserve OS defaults. Socket-buffer sizes are not overridden;
+`TCP_NODELAY` is enabled to avoid holding small forwarding writes.
 
 Logs go to stderr. See [Logging](#logging) for levels and explicit snapshots.
 Counters include accepted,

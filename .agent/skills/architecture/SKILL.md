@@ -45,7 +45,7 @@ Single-owner runLoop(false) must compile out control/heartbeat work.
 interest and performs teardown. `pool.zig` retains generations between uses;
 reinitializing an occupied connection must never reset that metadata.
 
-Io also holds process-level optional TCP settings. configureSocket applies NODELAY
+Each owner's Io holds the configured optional TCP settings. configureSocket applies NODELAY
 and explicit keepalive/user timeout once on admission or before backend connect;
 defaults leave those kernel options untouched. Failed client setup closes before
 pool acquisition and counts rejected with errno context; outgoing failure closes

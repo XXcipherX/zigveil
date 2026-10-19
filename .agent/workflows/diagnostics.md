@@ -88,8 +88,9 @@ or policy-denied listener. Check stderr and listener ownership/OS policy.
 
 Check `/proc/$PID/fd`, `/proc/$PID/status` and OS TCP memory alongside counters.
 Reserved buffer bytes, RSS and kernel socket memory measure different resources.
-Four additional idle fds may belong to the process's shared relay pipes after
-bulk traffic. They must stay constant across connection churn; no connection may
+Each serving owner may retain four idle fds for its shared relay pipes after
+bulk traffic, up to four times workers for the process. After pipe initialization
+they must stay constant across connection churn; no connection may
 retain bytes in them after its callback. Instrumented SIGUSR1 snapshots distinguish
 splice traffic, ring spills, activation/fallback and the shared pipe capacity.
 pipe_deactivations counts each direction returning to buffered mode; it does not

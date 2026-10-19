@@ -306,7 +306,7 @@ share the usual call/byte budgets. A blocked write, partial drain, budget yield
 or fatal socket error reclaims every pending pipe byte before another connection
 can borrow it. Live debt goes into that direction's empty ring; fatal debt is
 discarded. This bounded spill can require additional pipe reads at callback exit.
-An unexpected reclamation failure disables the process's pipe path and closes
+An unexpected reclamation failure disables that owner's pipe path and closes
 the affected connection. Ring data always precedes subsequent source data and FIN.
 
 Eligibility and consecutive short-read counts belong to Direction. After 32
@@ -356,8 +356,9 @@ permits restarting a listener; SO_REUSEPORT groups internal worker listeners and
 can also support explicitly coordinated external processes.
 IPv6 listeners are V6ONLY so the family is predictable. TCP_NODELAY avoids buffering
 small forwarding writes; large streams are not expected to benefit from it alone.
-Keepalive, TCP_USER_TIMEOUT and forced socket buffer sizes are deferred to workload
-measurement. MSG_NOSIGNAL confines broken-pipe failure to the connection.
+Keepalive and TCP_USER_TIMEOUT are explicit opt-ins; see [Optional TCP liveness](#optional-tcp-liveness).
+Omitted options preserve OS defaults; socket buffer sizes are not forced.
+MSG_NOSIGNAL confines broken-pipe failure to the connection.
 
 Hello and connect timestamps are absolute. Prefix flushing uses a fresh absolute
 connect-timeout interval after connect completion, so a slow peer cannot pin all
@@ -511,7 +512,7 @@ zero. Validation precedes DNS/bind: keepalive seconds are 1..32767, probes 1..12
 and user timeout 0..2147483647 ms, matching Linux's positive int option bounds.
 No partial object, unknown nested field or numeric overflow is accepted.
 
-Io stores these settings once per process. Its configureSocket retains NODELAY,
+Each owner's Io stores these settings once. Its configureSocket retains NODELAY,
 sets the keepalive parameters before enabling SO_KEEPALIVE, and sets USER_TIMEOUT
 only for a nonzero value. Defaults perform only the previous NODELAY call and do
 not overwrite inherited/kernel options. Server applies setup after capacity
