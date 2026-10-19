@@ -31,22 +31,8 @@ class WorkerDaemon(SingleDaemon):
 
 
 def listener_count(daemon):
-    owned = set()
     try:
-        for fd in Path(f"/proc/{daemon.process.pid}/fd").iterdir():
-            try:
-                target = os.readlink(fd)
-            except FileNotFoundError:
-                continue
-            if target.startswith("socket:["):
-                owned.add(target[8:-1])
-        sockets = set()
-        for table in ("tcp", "tcp6"):
-            for line in Path(f"/proc/{daemon.process.pid}/net/{table}").read_text().splitlines()[1:]:
-                fields = line.split()
-                if fields[3] == "0A" and int(fields[1].split(":")[1], 16) == daemon.port and fields[9] in owned:
-                    sockets.add(fields[9])
-        return len(sockets)
+        return len(set(base.listening_inodes(daemon.process.pid, daemon.port)))
     except FileNotFoundError:
         return 0
 

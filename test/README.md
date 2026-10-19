@@ -74,7 +74,8 @@ exhausted-pool identification, info/warn/error/none filtering, the SIGUSR2 cycle
 snapshots while muted, hello/idle expiry severity and one DEBUG close with lifetime,
 configured route and precise RST details without payload leakage or changed accounting.
 Invalid logging settings fail before bind. Readiness checks an owned socket without probe
-traffic and works independently of INFO output.
+traffic and works independently of INFO output. Single-owner readiness and worker
+listener counts share the same PID/port-filtered LISTEN inode iterator.
 
 Shutdown integration holds a silent hello and a live long-lived relay open until
 SIGTERM/SIGINT, then requires exit within five seconds, both peers to close, final

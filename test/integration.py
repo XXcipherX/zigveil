@@ -48,6 +48,23 @@ def free_port(ipv6=False):
         return sock.getsockname()[1]
 
 
+def listening_inodes(pid, port):
+    """Yield owned LISTEN sockets; callers handle a process disappearing."""
+    owned = set()
+    for fd in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:
+            continue
+        if target.startswith("socket:["):
+            owned.add(target[8:-1])
+    for table in ("tcp", "tcp6"):
+        for line in Path(f"/proc/{pid}/net/{table}").read_text().splitlines()[1:]:
+            fields = line.split()
+            if fields[3] == "0A" and int(fields[1].split(":")[1], 16) == port and fields[9] in owned:
+                yield fields[9]
+
+
 def exact(sock, count):
     result = bytearray()
     while len(result) < count:
@@ -182,23 +199,10 @@ class Daemon:
             raise
 
     def listening(self):
-        inodes = set()
         try:
-            for fd in Path(f"/proc/{self.process.pid}/fd").iterdir():
-                try:
-                    target = os.readlink(fd)
-                except FileNotFoundError:
-                    continue
-                if target.startswith("socket:["):
-                    inodes.add(target[8:-1])
-            for table in ("tcp", "tcp6"):
-                for line in Path(f"/proc/{self.process.pid}/net/{table}").read_text().splitlines()[1:]:
-                    fields = line.split()
-                    if fields[3] == "0A" and int(fields[1].split(":")[1], 16) == self.port and fields[9] in inodes:
-                        return True
+            return next(listening_inodes(self.process.pid, self.port), None) is not None
         except FileNotFoundError:
-            pass
-        return False
+            return False
 
     def logs(self):
         return self.log_path.read_text(encoding="utf-8")
