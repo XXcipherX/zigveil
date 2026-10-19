@@ -379,9 +379,12 @@ pub fn nowMs() !u64 {
 
 pub fn checkFdLimit(max_connections: u32) !void {
     const limit = try std.posix.getrlimit(.NOFILE);
-    if (relay_pipe.enabled) {
-        if (limit.cur < @as(u64, max_connections) * 2 + 12) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus12;
-    } else if (limit.cur < @as(u64, max_connections) * 2 + 8) return error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus8;
+    if (limit.cur < requiredFds(max_connections, 1)) {
+        return if (relay_pipe.enabled)
+            error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus12
+        else
+            error.RaiseRLIMIT_NOFILEToAtLeastTwiceMaxConnectionsPlus8;
+    }
 }
 
 /// Threads share one descriptor table. Retain the old single-owner requirement.

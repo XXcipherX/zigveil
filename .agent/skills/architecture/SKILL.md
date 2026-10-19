@@ -165,7 +165,9 @@ Metadata and kernel socket memory are additional; virtual capacity is not RSS.
 User-owned slabs allocate at startup. Splice acquires a fixed pair of kernel
 pipes lazily, with at most two ring capacities and four fds per owner. Startup
 checks `2 × max_connections + 12` fds for N=1 (`+ 8` when splice is disabled).
-For N>1 use `2*C+8*N+8` or `2*C+4*N+8` without splice. C/H are process totals:
+For N>1 use `2*C+8*N+8` or `2*C+4*N+8` without splice. requiredFds is the shared
+formula. Server/Runtime validate before allocating serving resources; main checks
+the same limit separately only for --check. C/H are process totals:
 divide with remainders; require both >= N; never clone whole slabs per owner.
 Explicit workers is 1..16 with default 1; no auto or forced affinity.
 Do not introduce per-packet allocation, copies

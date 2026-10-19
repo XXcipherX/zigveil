@@ -44,8 +44,8 @@ fn run(init: std.process.Init.Minimal, log: *Logger) !void {
     defer config.deinit(allocator);
     log.level = if (check) .info else config.raw.value.log_level;
     log.format = config.raw.value.log_format;
-    try net.checkWorkerFdLimit(config.raw.value.max_connections, config.raw.value.workers);
     if (check) {
+        try net.checkWorkerFdLimit(config.raw.value.max_connections, config.raw.value.workers);
         net.print("zigveil: config valid; routes={d} fallback={} fallback_proxy_protocol={d} workers={d} buffers={d} bytes; fd limit sufficient\n", .{ config.routes.len, config.fallback != null, config.raw.value.fallback_proxy_protocol, config.raw.value.workers, Config.bufferBytes(config.raw.value) });
         return;
     }
