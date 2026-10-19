@@ -97,10 +97,6 @@ pub const Config = struct {
         self.raw.deinit();
     }
 
-    pub fn lookup(self: *const Config, name: ?*const Name) ?Address {
-        return if (self.lookupRoute(name)) |route| route.backend else null;
-    }
-
     pub fn lookupRoute(self: *const Config, name: ?*const Name) ?*const Route {
         if (name) |value| for (self.routes) |*route| {
             if (route.name.eql(value)) return route;
@@ -169,9 +165,9 @@ test "exact canonical routes, missing and unknown names, fallback" {
     defer config.deinit(std.testing.allocator);
     const known = try Name.parse("eXAMPLE.com");
     const unknown = try Name.parse("example.org");
-    try std.testing.expect(config.lookup(&known) != null);
-    try std.testing.expect(config.lookup(&unknown) == null);
-    try std.testing.expect(config.lookup(null) == null);
+    try std.testing.expectEqual(@as(u16, 9443), config.lookupRoute(&known).?.backend.getPort());
+    try std.testing.expect(config.lookupRoute(&unknown) == null);
+    try std.testing.expect(config.lookupRoute(null) == null);
     try std.testing.expect(config.fallback != null);
     try std.testing.expectEqual(@as(u64, 132 * 1024 * 1024), Config.bufferBytes(config.raw.value));
     try std.testing.expectEqual(@as(u8, 1), config.raw.value.workers);
@@ -339,7 +335,7 @@ test "host routes and fallback resolve at startup and retain only numeric endpoi
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), resolver.calls);
     const name = try Name.parse("example.com");
-    for (0..10) |_| try std.testing.expectEqual(@as(u16, 9443), config.lookup(&name).?.getPort());
+    for (0..10) |_| try std.testing.expectEqual(@as(u16, 9443), config.lookupRoute(&name).?.backend.getPort());
     try std.testing.expectEqual(@as(u16, 9444), config.fallback.?.getPort());
     try std.testing.expectEqual(@as(usize, 2), resolver.calls);
 }

@@ -19,8 +19,10 @@ The complete rationale is [docs/DESIGN.md](../../../docs/DESIGN.md).
 ## Ownership and dependency boundaries
 
 `main.zig` owns config lifetime and startup validation. `Config` owns its parsed
-JSON and Route array; its values outlive `Server`. The server owns all fds,
-registrations, connection slots, freelists and byte slabs. A slot borrows exactly
+JSON and Route array; its values outlive `Server`. `lookupRoute` lends a const Route
+pointer; configuration tests use the same lookup entry point as the production
+connection engine. The server owns all fds, registrations, connection slots,
+freelists and byte slabs. A slot borrows exactly
 two relay slices and, while needed, one staging slice. Configuration endpoints and
 owned `Name` values cannot refer into a recycled staging buffer.
 
