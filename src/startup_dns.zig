@@ -3,7 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 const HostName = net.HostName;
-const Results = Io.Queue(HostName.LookupResult);
+const Results = Io.Queue(net.IpAddress);
 
 pub fn lookup(name: HostName, io: Io, results: *Results, port: u16) !void {
     defer results.close(io);
@@ -12,8 +12,8 @@ pub fn lookup(name: HostName, io: Io, results: *Results, port: u16) !void {
     if (std.mem.endsWith(u8, name.bytes, localhost) and
         (name.bytes.len == localhost.len or name.bytes[name.bytes.len - localhost.len - 1] == '.'))
     {
-        try results.putOne(io, .{ .address = .{ .ip6 = .loopback(port) } });
-        try results.putOne(io, .{ .address = .{ .ip4 = .loopback(port) } });
+        try results.putOne(io, .{ .ip6 = .loopback(port) });
+        try results.putOne(io, .{ .ip4 = .loopback(port) });
         return;
     }
 
@@ -76,7 +76,7 @@ fn lookupHosts(name: HostName, io: Io, results: *Results, port: u16) !bool {
         } else continue;
         const address = net.IpAddress.parseIp4(ip, port) catch
             (net.IpAddress.parseIp6(ip, port) catch continue);
-        try results.putOne(io, .{ .address = address });
+        try results.putOne(io, address);
         found = true;
     }
     return found;
@@ -215,7 +215,7 @@ fn lookupDns(name: []const u8, io: Io, rc: *const HostName.ResolvConf, results: 
                 .AAAA => if (data.len == 16) .{ .ip6 = .{ .bytes = data[0..16].*, .port = port } } else return error.InvalidDnsAAAARecord,
                 else => continue,
             };
-            try results.putOne(io, .{ .address = address });
+            try results.putOne(io, address);
             found = true;
         }
     }
@@ -331,7 +331,7 @@ test "ready discarded DNS replies cannot extend lookup or retry deadlines" {
                 .search_len = 0,
             };
             rc.nameservers_buffer[0] = .{ .ip4 = .loopback(53) };
-            var result_storage: [1]HostName.LookupResult = undefined;
+            var result_storage: [1]net.IpAddress = undefined;
             var results: Results = .init(&result_storage);
             try std.testing.expectError(error.NameServerFailure, lookupDns("backend.example.test", io, &rc, &results, 443));
             try std.testing.expectEqual(@as(usize, 2), fake.receives);

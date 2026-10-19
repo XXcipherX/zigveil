@@ -80,16 +80,13 @@ pub const Resolver = struct {
         var name_buffer: [254]u8 = undefined;
         for (host.bytes, name_buffer[0..host.bytes.len]) |c, *dest| dest.* = std.ascii.toLower(c);
         const name: HostName = .{ .bytes = name_buffer[0..host.bytes.len] };
-        var results_buffer: [16]HostName.LookupResult = undefined;
-        var results: std.Io.Queue(HostName.LookupResult) = .init(&results_buffer);
+        var results_buffer: [16]Address = undefined;
+        var results: std.Io.Queue(Address) = .init(&results_buffer);
         var lookup = try io.concurrent(startup_dns.lookup, .{ name, io, &results, port });
         defer lookup.cancel(io) catch {};
         var selection: Selection = .{};
-        while (results.getOne(io)) |result| {
-            switch (result) {
-                .address => |addr| selection.add(addr),
-                .canonical_name => {},
-            }
+        while (results.getOne(io)) |address| {
+            selection.add(address);
         } else |err| switch (err) {
             error.Closed => {},
             else => return err,
