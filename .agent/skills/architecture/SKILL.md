@@ -131,7 +131,9 @@ absolute-level command. The cold Writer mutex covers complete output lines only.
 Periodic text INFO shows
 cumulative up/down totals and rates from wrapping byte deltas over actual monotonic
 elapsed time. Suppress unchanged traffic/active gauges, even with idle connections.
-JSON stats retain every original counter. Warning/error events enter fixed batches
+Only the two forwarded-byte counters need periodic deltas. Retain the complete
+previous snapshot for JSON change detection; JSON stats retain every original
+counter. Warning/error events enter fixed batches
 on cold failure paths; each owner emits at most one line per severity per second. Counts cover
 the batch and `last:` labels only its most recent event's context. Hello/idle expiry
 and reset/pipe outcomes stay in diagnostics/debug; connect/prefix expiry and actual

@@ -215,7 +215,8 @@ pub const Logger = struct {
         // Retain its pending window rather than inventing an elapsed interval.
         if (now <= self.previous_activity_ms) return;
         const elapsed = now - self.previous_activity_ms;
-        const changes = delta(counts.*, self.previous_activity);
+        const uploaded = counts.bytes_client_to_backend -% self.previous_activity.bytes_client_to_backend;
+        const downloaded = counts.bytes_backend_to_client -% self.previous_activity.bytes_backend_to_client;
         const changed = if (self.format == .json)
             !std.meta.eql(counts.*, self.previous_activity)
         else
@@ -227,9 +228,9 @@ pub const Logger = struct {
         if (!self.enabled(.info) or !changed) return;
         if (self.format == .json) return self.jsonSnapshot(counts);
         self.forceMessage(.info, "activity", "stats | active={d} | avg({f}s): up={f} down={f} | total: up={f} down={f}", .{
-            counts.active,                                                           Seconds{ .ms = elapsed },
-            Rate{ .bytes = changes.bytes_client_to_backend, .elapsed_ms = elapsed }, Rate{ .bytes = changes.bytes_backend_to_client, .elapsed_ms = elapsed },
-            Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true },  Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
+            counts.active,                                                          Seconds{ .ms = elapsed },
+            Rate{ .bytes = uploaded, .elapsed_ms = elapsed },                       Rate{ .bytes = downloaded, .elapsed_ms = elapsed },
+            Bytes{ .value = counts.bytes_client_to_backend, .two_decimals = true }, Bytes{ .value = counts.bytes_backend_to_client, .two_decimals = true },
         });
     }
 
@@ -360,16 +361,6 @@ fn appendContext(body: *Message, context: Context) void {
     if (context.side) |side| body.append(" side={s}", .{@tagName(side)});
     if (context.operation) |operation| body.append(" operation={s}", .{@tagName(operation)});
     if (context.errno) |err| body.append(" errno={d}({s})", .{ @backingInt(err), std.enums.tagName(linux.E, err) orelse "UNKNOWN" });
-}
-
-fn delta(current: Counters, previous: Counters) Counters {
-    var result = current;
-    inline for (@typeInfo(Counters).@"struct".field_names) |field_name| {
-        if (comptime !std.mem.eql(u8, field_name, "active") and !std.mem.eql(u8, field_name, "last_other_io_errno")) {
-            @field(result, field_name) = @field(current, field_name) -% @field(previous, field_name);
-        }
-    }
-    return result;
 }
 
 fn wallSeconds() u64 {
@@ -547,11 +538,11 @@ test "maximum-width text totals, byte units and wrapping deltas stay bounded" {
     logger.closed(.{ .id = std.math.maxInt(u64), .lifetime_ms = std.math.maxInt(u64), .route = &route, .reason = "proxy_metadata_failed", .context = context, .hello_timeout = true });
     try std.testing.expect(std.mem.find(u8, capture.slice(), "message exceeds log limit") == null);
     try std.testing.expect(std.mem.find(u8, capture.slice(), "hello_timeout=true") != null);
-    counts.accepted = 2;
-    const changes = delta(counts, .{ .accepted = std.math.maxInt(u64) });
-    try std.testing.expectEqual(@as(u64, 3), changes.accepted);
-    try std.testing.expectEqual(counts.active, changes.active);
-    try std.testing.expectEqual(counts.last_other_io_errno, changes.last_other_io_errno);
+    capture.len = 0;
+    counts.bytes_client_to_backend = 2;
+    counts.bytes_backend_to_client = 4;
+    logger.periodic(1001, &counts);
+    try std.testing.expect(std.mem.find(u8, capture.slice(), "avg(1s): up=3.00B/s down=5.00B/s | total: up=2B down=4B") != null);
 }
 
 test "level changes flush visible pending failures without replaying muted counts" {
