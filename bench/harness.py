@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass, field
+from functools import cache
 import json
 import math
 import platform
@@ -13,10 +14,14 @@ import socket
 import sys
 import time
 
-# A long deterministic wire pattern, compared in C by bytes.startswith. Checking
-# only byte counts would miss same-length corruption. No payload copies for sends.
 PATTERN_BYTES = 1 << 20
-PATTERN = random.Random(0x7A69677665696C).randbytes(PATTERN_BYTES) * 2
+
+
+@cache
+def payload_pattern():
+    # Compared in C by bytes.startswith: byte counts alone miss corruption.
+    # Serve and workloads without bulk/data warmup do not need this allocation.
+    return random.Random(0x7A69677665696C).randbytes(PATTERN_BYTES) * 2
 
 
 @dataclass
@@ -86,7 +91,8 @@ async def connect(args):
 
 async def bulk(pair, args, deadline, progress, drain_event=None):
     reader, writer = pair
-    pattern = memoryview(PATTERN)
+    wire_pattern = payload_pattern()
+    pattern = memoryview(wire_pattern)
     credit = asyncio.Event()
     # Wake a sender waiting for echo credit when its sending window ends, even
     # if the peer stops replying. This timer is per stream, not per packet.
@@ -114,7 +120,7 @@ async def bulk(pair, args, deadline, progress, drain_event=None):
     sender = asyncio.create_task(send())
     try:
         while data := await reader.read(65536):
-            if not PATTERN.startswith(data, progress.rx % PATTERN_BYTES):
+            if not wire_pattern.startswith(data, progress.rx % PATTERN_BYTES):
                 progress.corruption_events += 1
                 raise ValueError("bulk echo corruption")
             progress.rx += len(data)
@@ -175,8 +181,8 @@ async def churn(args, deadline, progress):
 
 async def warmup(pair, seconds, size=65536):
     reader, writer = pair
+    payload = payload_pattern()[:size]
     deadline = time.monotonic() + seconds
-    payload = PATTERN[:size]
     while time.monotonic() < deadline:
         writer.write(payload)
         await writer.drain()
@@ -242,6 +248,9 @@ async def run(args):
             if errors:
                 return failed_preparation(args, "setup", errors)
         warmup_seconds = getattr(args, "warmup", 0)
+        if args.mode in ("bulk", "loaded-latency") or (warmup_seconds and args.mode != "churn"):
+            # Materialize before warmup and ready/go, even with warmup disabled.
+            payload_pattern()
         if warmup_seconds:
             if args.mode == "churn":
                 tasks = [asyncio.create_task(churn(args, time.monotonic() + warmup_seconds, Progress()))]

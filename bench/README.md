@@ -4,6 +4,9 @@ The tools here are optional. Zigveil has no benchmark runtime dependencies.
 The workload is a synthetic ClientHello followed by opaque TCP echo data.
 Every payload byte is checked against a deterministic pattern; TLS cryptography
 and application processing are outside this measurement.
+The Python actor creates its deterministic bulk pattern only when bulk or data
+warmup needs it, before warmup and the ready/go barrier. Origin-only actors and
+latency/churn without data warmup do not allocate that pattern.
 
 ## Paired measurements
 
