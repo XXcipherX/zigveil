@@ -377,7 +377,7 @@ Timer nodes and indices add 20 bytes per capacity slot on the supported 64-bit t
 
 With workers=1, SIGINT/TERM/USR1/USR2 are blocked and consumed through signalfd
 in the owning loop. Multi-owner signal flow is described above.
-The first SIGINT/SIGTERM sets the stop deadline to the current time, removes the
+The first SIGINT/SIGTERM sets a boolean stop request, removes the
 listener registration and closes the listener once. After consuming the signal
 batch, run leaves event dispatch immediately, without processing further socket
 events or timers. The existing drop path marks live slots as stopping, cancels

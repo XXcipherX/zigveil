@@ -39,7 +39,7 @@ pub const Server = struct {
     io: net.Io = .{},
     listener_registered: bool = true,
     accept_resume_ms: u64 = 0,
-    stop_deadline_ms: ?u64 = null,
+    stop_requested: bool = false,
     now_ms: u64 = 0,
     worker_heartbeat_ms: u64 = 0,
 
@@ -141,16 +141,13 @@ pub const Server = struct {
                 // when the wake fd would be last among ready events.
                 if (mailbox.commands.load(.acquire) != 0) {
                     try self.workerCommands(now);
-                    if (self.stop_deadline_ms != null) break :serving;
+                    if (self.stop_requested) break :serving;
                 }
             }
-            if (self.stop_deadline_ms) |deadline| {
-                if (self.counts.active == 0 or now >= deadline) break;
-            }
+            if (self.stop_requested) break;
             var wake = now +| 250;
             if (self.timers.first()) |timer| wake = @min(wake, timer.when);
-            if (self.stop_deadline_ms) |deadline| wake = @min(wake, deadline);
-            if (!self.listener_registered and self.stop_deadline_ms == null) wake = @min(wake, self.accept_resume_ms);
+            if (!self.listener_registered) wake = @min(wake, self.accept_resume_ms);
             if (self.config.raw.value.stats_interval_ms != 0) wake = @min(wake, stats);
             const timeout: i32 = @intCast(wake -| now);
             self.io.metrics.add("epoll_wait", 1);
@@ -164,19 +161,19 @@ pub const Server = struct {
             self.now_ms = now;
             if (threaded and self.worker_control.?.commands.load(.acquire) != 0) {
                 try self.workerCommands(now);
-                if (self.stop_deadline_ms != null) break :serving;
+                if (self.stop_requested) break :serving;
             }
             for (events[0..rc]) |event| {
                 const token = event.data.u64;
                 if (token == 0) {
                     self.io.metrics.add("listener_events", 1);
-                    if (self.listener_registered and self.stop_deadline_ms == null) try self.admit(now);
+                    if (self.listener_registered) try self.admit(now);
                     continue;
                 }
                 if (token == 1) {
                     self.io.metrics.add("signal_events", 1);
                     if (threaded) try self.workerCommands(now) else try self.signal(now);
-                    if (self.stop_deadline_ms != null) break :serving;
+                    if (self.stop_requested) break :serving;
                     continue;
                 }
                 const index = self.pool.resolve(token) orelse {
@@ -210,7 +207,7 @@ pub const Server = struct {
                     try self.reconcile(timer.slot);
                 } else self.timers.set(timer.slot, conn.deadline(self.config.raw.value));
             }
-            if (!self.listener_registered and self.stop_deadline_ms == null and now >= self.accept_resume_ms) {
+            if (!self.listener_registered and now >= self.accept_resume_ms) {
                 try control(self.epoll, linux.EPOLL.CTL_ADD, self.listener, linux.EPOLL.IN, 0, &self.io.metrics);
                 self.listener_registered = true;
             }
@@ -228,16 +225,16 @@ pub const Server = struct {
         const mailbox = self.worker_control.?;
         const flags = try mailbox.take();
         if (flags & workers.stop != 0) {
-            try self.stop(now);
+            try self.stop();
             return;
         }
         if (flags & workers.level != 0) self.log.setLevel(@fromBackingInt(mailbox.desired_level.load(.monotonic)), now, &self.counts, false);
         if (flags & workers.snapshot != 0) try mailbox.publish(self.counts, self.io.metrics);
     }
 
-    pub fn stop(self: *Server, now: u64) !void {
-        if (self.stop_deadline_ms != null) return;
-        self.stop_deadline_ms = now;
+    pub fn stop(self: *Server) !void {
+        if (self.stop_requested) return;
+        self.stop_requested = true;
         if (self.listener_registered) try control(self.epoll, linux.EPOLL.CTL_DEL, self.listener, 0, 0, &self.io.metrics);
         self.listener_registered = false;
         net.close(self.listener);
@@ -408,9 +405,9 @@ pub const Server = struct {
                 }
             } else if (info.signo == @backingInt(linux.SIG.USR2)) {
                 self.log.cycle(now, &self.counts);
-            } else if (self.stop_deadline_ms == null) {
+            } else if (!self.stop_requested) {
                 self.log.message(.info, "stopping", "closing active connections; active={d}", .{self.counts.active});
-                try self.stop(now);
+                try self.stop();
             }
         }
     }
@@ -563,7 +560,7 @@ test "stop signals close the listener once and release every connection phase" {
     // Target the blocked serving thread even if the test runner owns other threads.
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.tgkill(linux.getpid(), linux.gettid(), .TERM)));
     try server.signal(stop_now);
-    try std.testing.expectEqual(@as(?u64, stop_now), server.stop_deadline_ms);
+    try std.testing.expect(server.stop_requested);
     try std.testing.expectEqual(@as(i32, -1), server.listener);
     try std.testing.expect(!server.listener_registered);
     try std.testing.expectEqual(linux.E.BADF, linux.errno(linux.fcntl(server_fds[0], linux.F.GETFD, 0)));
@@ -571,7 +568,7 @@ test "stop signals close the listener once and release every connection phase" {
     for ([_]linux.SIG{ .TERM, .INT }) |sig| {
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.tgkill(linux.getpid(), linux.gettid(), sig)));
         try server.signal(stop_now + 1);
-        try std.testing.expectEqual(@as(?u64, stop_now), server.stop_deadline_ms);
+        try std.testing.expect(server.stop_requested);
     }
     if (metrics.enabled) try std.testing.expectEqual(@as(u64, 1), server.io.metrics.get("close"));
     try server.run();

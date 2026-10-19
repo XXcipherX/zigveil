@@ -152,7 +152,8 @@ discarded; stopping does not count as an I/O error. Final enabled logs follow dr
 Every pump has already returned its borrow, so shared pipes remain Io-owned until
 Server.deinit closes its pipes/epoll and frees pools/slabs. The single owner also
 owns its Signals scope; multi-worker Signals restore only after all joins. Repeated
-stop signals must not close the listener again. There is no session drain window;
+stop signals must not close the listener again. The stop state is a boolean request,
+not a future deadline. There is no session drain window;
 Docker/systemd timeouts are emergency limits.
 
 ## Resource and time model
