@@ -2,6 +2,9 @@
 
 `zig build test` imports parser, name, config, buffer, pool, timers, connection, server and
 Linux syscall-boundary tests.
+Parser cases live in `src/client_hello_test.zig`, imported by both unit and fuzz
+roots. Keep fixture imports out of production parser sources so Docker builds do
+not need those test-only files.
 The artificial socket implementation drives **the production Connection engine**;
 it substitutes recv/send/connect/shutdown operations, not state transitions.
 

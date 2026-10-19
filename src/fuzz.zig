@@ -2,6 +2,10 @@ const std = @import("std");
 const hello = @import("client_hello.zig");
 const fixture = @import("test_hello.zig");
 
+test {
+    _ = @import("client_hello_test.zig");
+}
+
 /// A pure entry point for coverage-guided or external fuzz harnesses as well.
 pub fn check(bytes: []const u8) !void {
     switch (hello.parse(bytes)) {

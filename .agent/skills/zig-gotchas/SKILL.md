@@ -18,6 +18,10 @@ description: Zig 0.17.0 API and Linux syscall details relevant to this project's
 
 Check the installed 0.17.0 standard library or the tagged official source before
 using a new API. ArrayList and std.Io APIs differ from older Zig releases.
+Zig resolves literal imports in test declarations even while compiling a daemon.
+Keep parser fixture-dependent cases in client_hello_test.zig, imported by the unit
+and fuzz roots only. Excluding test fixtures from Docker requires that production
+source files contain no imports of them, including inside test blocks.
 Use `std.lang.Optimize` and the canonical `debug/safe/fast/small` names. The build
 requires the exact stable release; prerelease/build suffixes are rejected.
 `standardTargetOptions` defaults to a baseline CPU model. CI passes each production

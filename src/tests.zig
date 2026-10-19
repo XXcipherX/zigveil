@@ -1,5 +1,5 @@
 test {
-    _ = @import("client_hello.zig");
+    _ = @import("client_hello_test.zig");
     _ = @import("proxy_protocol.zig");
     _ = @import("name.zig");
     _ = @import("config.zig");

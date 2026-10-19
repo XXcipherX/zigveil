@@ -24,6 +24,9 @@ The publish workflow builds by digest on native Ubuntu 26.04 runners, verifies
 runtime behavior and runnable platforms, then publishes the selected/latest/SHA
 tags. Optional amd64-v3 images require compatible CPU flags. Use current action
 major tags.
+The production build context excludes dedicated Zig test/fuzz roots and fixtures;
+keep them in the checkout and full Linux CI. A fixture-only edit must not invalidate
+the production source COPY layer. Build only the default executable in Docker.
 The runtime is scratch with a direct daemon ENTRYPOINT. Builder readelf checks
 must reject an interpreter or DT_NEEDED and preserve PIE. CMD supplies only the
 default config path; native CLI errors handle absent/invalid files. Docker mounts

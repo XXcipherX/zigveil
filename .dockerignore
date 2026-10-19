@@ -3,5 +3,11 @@
 !build.zig
 !src/
 !src/**
+# Dedicated test roots and fixtures are not inputs to the production executable.
+src/client_hello_test.zig
+src/connection_test.zig
+src/test_hello.zig
+src/tests.zig
+src/fuzz.zig
 !examples/
 !examples/zigveil.json
