@@ -101,11 +101,13 @@ race is not asserted: its existing error probe can consume reset before send.
 python3 test/integration.py --binary zig-out/bin/zigveil
 ```
 
-The CI runs builds and unit tests in debug, safe and fast, socket
+Full CI runs builds and unit tests in debug, safe and fast, socket
 tests in debug and fast, parser mutations in safe, a smoke test of
 the benchmark workload, and focused harness regressions.
 Native Docker smoke tests cover amd64/arm64 and amd64-v3 in fast and safe.
 The amd64 fast image also runs the Compose installer/update E2E.
+Documentation-only pushes/PRs use a short path with an explicit CI result instead
+of these matrices. Manual Linux CI always runs the complete verification.
 `test/bench_harness.py` checks bounded unreturned echo credit, delayed drain, failed
 measurement JSON and exit status, cancellation/close cleanup, and 1000 real streams
 through fast Zigveil with clean byte counts, FIN and I/O counters:

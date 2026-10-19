@@ -33,8 +33,10 @@ default config path; native CLI errors handle absent/invalid files. Docker mount
 hosts/resolver files independently of the base image. Keep no shell, NSS, CA or
 timezone packages without an actual dependency. Inspect through host tools and
 docker logs; --check/help/version must work with a read-only filesystem.
-The operator checks successful Linux CI for the source commit before manually
-publishing. Publication builds directly; it does not repeat the Linux CI matrix,
+The operator checks successful full Linux CI for the source code before manually
+publishing. Documentation-only CI classifies changed paths; it does not run binary
+checks. Use the unchanged code revision's full run or manually run full CI for that
+SHA. Publication builds directly; it does not repeat the Linux CI matrix,
 query existing runs or wait for their results. Keep the ordinary CI independent.
 Import CI and publication Docker caches with matching architecture, CPU profile
 and fast/safe mode; cache misses must still permit a normal image build.

@@ -9,8 +9,50 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  changes:
+    name: Select verification scope
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          full=true
+          if [[ "$EVENT_NAME" != workflow_dispatch && -n "$BASE_SHA" ]] &&
+             git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            range="$BASE_SHA..$HEAD_SHA"
+            if [[ "$EVENT_NAME" == pull_request ]]; then range="$BASE_SHA...$HEAD_SHA"; fi
+            git diff --name-only --no-renames -z "$range" -- > "$RUNNER_TEMP/changed-paths"
+            if [[ -s "$RUNNER_TEMP/changed-paths" ]]; then
+              full=false
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  README.md|CONTRIBUTING.md|AGENTS.md|.agent/*.md|docs/*.md|bench/README.md|test/README.md) ;;
+                  *) full=true; break ;;
+                esac
+              done < "$RUNNER_TEMP/changed-paths"
+            fi
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          if [[ "$full" == true ]]; then
+            echo 'Full Linux and Docker verification selected.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Documentation-only changes: Linux/Docker matrices skipped. Run this workflow manually for full verification.' >> "$GITHUB_STEP_SUMMARY"
+          fi
   linux:
     name: Linux ${{ matrix.arch }} ${{ matrix.cpu }}
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +200,8 @@ jobs:
           python3 test/workers.py --binary "$RUNNER_TEMP/tsan/bin/zigveil" --tsan
   docker:
     name: Docker ${{ matrix.arch }} ${{ matrix.mode }}
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
@@ -218,3 +262,26 @@ jobs:
       - name: Compose installer and update E2E
         if: matrix.arch == 'amd64' && matrix.mode == 'fast'
         run: sudo python3 test/installer_e2e.py --image zigveil:ci
+  result:
+    name: CI result
+    needs: [changes, linux, docker]
+    if: ${{ always() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 3
+    steps:
+      - name: Require the selected verification to succeed
+        env:
+          SCOPE_RESULT: ${{ needs.changes.result }}
+          FULL: ${{ needs.changes.outputs.full }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+        run: |
+          set -euo pipefail
+          [[ "$SCOPE_RESULT" == success ]]
+          if [[ "$FULL" == true ]]; then
+            [[ "$LINUX_RESULT" == success && "$DOCKER_RESULT" == success ]]
+            echo 'Full Linux and Docker verification passed.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            [[ "$FULL" == false && "$LINUX_RESULT" == skipped && "$DOCKER_RESULT" == skipped ]]
+            echo 'Documentation-only change classification passed; executable verification was not run.' >> "$GITHUB_STEP_SUMMARY"
+          fi

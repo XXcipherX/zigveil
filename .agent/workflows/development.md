@@ -33,7 +33,12 @@ python3 test/bench_harness.py --binary zig-out/bin/zigveil
 
 Docker/deployment changes additionally require shell syntax/lint, native image
 builds, `python3 test/docker_smoke.py --image IMAGE`, and the Compose installer E2E
-on a disposable systemd host. The normal CI runs these checks on amd64/arm64.
+on a disposable systemd host. Full CI runs these checks on amd64/arm64.
+The scope job skips Linux/Docker matrices only for an allowlist of Markdown guides.
+Mixed changes, unknown paths, missing base history and manual dispatch select full
+verification. Keep NUL-delimited paths and --no-renames so deleted/renamed code
+cannot hide behind a new documentation path. CI result must fail on a failed or
+cancelled required job and clearly identify a documentation-only result.
 Full Linux validation explicitly selects amd64/arm64 baseline and amd64
 x86_64_v3, matching production image profiles. Pass the matrix CPU to every build,
 test, fuzz and optional benchmark-tool build. The default ordinary build is baseline.
@@ -51,7 +56,9 @@ production ELF. Smoke covers direct CLI/default and explicit config arguments,
 missing/invalid config, Docker hosts and embedded DNS, read-only forwarding,
 active SIGTERM and restart. No shell is available in the runtime.
 Manual publication builds directly, while the operator checks that ordinary Linux
-CI succeeded for the source commit. Do not repeat the matrix or add run-status
+CI succeeded for the source code. A documentation-only source commit needs its
+unchanged code revision's full run or a manual full run for that SHA. Do not repeat
+the matrix or add run-status
 queries/waits to publication. Keep Docker cache scopes aligned by architecture,
 CPU profile and fast/safe mode; published digests still need smoke and platform
 checks.

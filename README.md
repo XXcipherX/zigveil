@@ -64,6 +64,11 @@ tools on native runners with amd64/arm64 baseline and amd64 `x86_64_v3` CPU sett
 It also exercises fast/safe Docker images for amd64, arm64 and
 amd64-v3, checks PIE and verifies the Compose installer/update flow. Zig is fetched from its official release with
 a pinned SHA-256 checksum.
+Changes limited to the root guides and Markdown under `docs/`, `.agent/`, or the
+benchmark/test README files use a short documentation-only path. The **CI result**
+job states which verification ran; code, configuration, tests, build and workflow
+changes retain the complete matrix. A manual **Linux CI** run always selects full
+verification, including for a documentation-only commit.
 
 The manual **Benchmarks** workflow measures bulk, latency and connection churn
 with direct-origin controls on native amd64/arm64 runners. Results and environment
@@ -322,7 +327,9 @@ the image: use `docker logs`, native CLI checks and tools on the host. Removing
 the base distribution reduces image contents; it does not change TCP throughput
 or the configured buffer reservation.
 
-Before publishing, check that **Linux CI** succeeded for the source commit. Publish
+Before publishing, check successful full **Linux CI** for the code being published.
+If the source commit has only documentation checks, use the full run for its
+unchanged code revision or manually run full CI for that commit. Publish
 with **Actions → Publish Docker image → Run workflow**. Linux CI runs separately;
 publication neither repeats its test matrix nor queries or waits for its result.
 
