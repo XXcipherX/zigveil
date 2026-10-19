@@ -36,10 +36,24 @@ jobs:
       labels: ${{ steps.meta.outputs.labels }}
       v3_tags: ${{ steps.v3.outputs.tags }}
       v3_labels: ${{ steps.v3.outputs.labels }}
+      matrix: ${{ steps.profiles.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - id: profiles
+        env:
+          PUBLISH_V3: ${{ inputs.publish_amd64_v3 }}
+        run: |
+          set -euo pipefail
+          matrix=$(jq -cn --argjson v3 "$PUBLISH_V3" '{include: [
+            {profile: "generic-amd64", arch: "amd64", cpu: "baseline", runner: "ubuntu-26.04", cache: "amd64"},
+            {profile: "generic-arm64", arch: "arm64", cpu: "baseline", runner: "ubuntu-26.04-arm", cache: "arm64"},
+            (if $v3 then
+              {profile: "amd64-v3", arch: "amd64", cpu: "x86_64_v3", runner: "ubuntu-26.04", cache: "amd64-v3"}
+            else empty end)
+          ]}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v6
         with:
@@ -58,18 +72,11 @@ jobs:
             type=raw,value=latest-amd64-v3,enable=${{ inputs.push_latest }}
             type=sha,prefix=sha-,suffix=-amd64-v3
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build ${{ matrix.cache }}
     needs: prepare
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-26.04
-          - arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-26.04-arm
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -84,16 +91,16 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/${{ matrix.arch }}
           build-args: |
             PRODUCTION_MODE=${{ inputs.production_mode }}
-            ZIGVEIL_CPU=baseline
+            ZIGVEIL_CPU=${{ matrix.cpu }}
           outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ needs.prepare.outputs.labels }}
+          labels: ${{ matrix.cpu == 'x86_64_v3' && needs.prepare.outputs.v3_labels || needs.prepare.outputs.labels }}
           cache-from: |
-            type=gha,scope=ci-docker-${{ matrix.arch }}-${{ inputs.production_mode }}
-            type=gha,scope=publish-${{ matrix.arch }}-${{ inputs.production_mode }}
-          cache-to: type=gha,scope=publish-${{ matrix.arch }}-${{ inputs.production_mode }},mode=max
+            type=gha,scope=ci-docker-${{ matrix.cache }}-${{ inputs.production_mode }}
+            type=gha,scope=publish-${{ matrix.cache }}-${{ inputs.production_mode }}
+          cache-to: type=gha,scope=publish-${{ matrix.cache }}-${{ inputs.production_mode }},mode=max
       - name: Verify image and export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -107,64 +114,16 @@ jobs:
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
       - uses: actions/upload-artifact@v7
         with:
-          name: digests-generic-${{ matrix.arch }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-  build_v3:
-    name: Build amd64-v3
-    needs: prepare
-    if: inputs.publish_amd64_v3
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          build-args: |
-            PRODUCTION_MODE=${{ inputs.production_mode }}
-            ZIGVEIL_CPU=x86_64_v3
-          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ needs.prepare.outputs.v3_labels }}
-          cache-from: |
-            type=gha,scope=ci-docker-amd64-v3-${{ inputs.production_mode }}
-            type=gha,scope=publish-amd64-v3-${{ inputs.production_mode }}
-          cache-to: type=gha,scope=publish-amd64-v3-${{ inputs.production_mode }},mode=max
-      - name: Verify image and export digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          IMAGE: ${{ needs.prepare.outputs.image }}
-        run: |
-          set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          docker pull "$IMAGE@$DIGEST"
-          python3 test/docker_smoke.py --image "$IMAGE@$DIGEST"
-          mkdir -p "$RUNNER_TEMP/digests"
-          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: digests-amd64-v3
+          name: digests-${{ matrix.profile }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
           overwrite: true
   publish:
-    needs: [prepare, build, build_v3]
+    needs: [prepare, build]
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success'
-          && needs.build.result == 'success'
-          && (needs.build_v3.result == 'success'
-              || (!inputs.publish_amd64_v3 && needs.build_v3.result == 'skipped')) }}
+          && needs.build.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:

@@ -39,6 +39,9 @@ query existing runs or wait for their results. Keep the ordinary CI independent.
 Import CI and publication Docker caches with matching architecture, CPU profile
 and fast/safe mode; cache misses must still permit a normal image build.
 Keep digest smoke checks and platform validation before publishing any tags.
+One build matrix covers generic amd64/arm64 and the optional amd64-v3 profile.
+Keep profile-specific labels, cache scopes and digest artifacts; every selected
+profile must succeed before the publication job can verify platforms and tag images.
 
 The installer is `deploy/install_docker_compose.sh`. First install needs a full
 CONFIG_SOURCE or explicit SNI/BACKEND. Existing JSON is retained on updates. Pull,
