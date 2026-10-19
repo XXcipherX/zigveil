@@ -5,6 +5,8 @@ Linux syscall-boundary tests.
 Parser cases live in `src/client_hello_test.zig`, imported by both unit and fuzz
 roots. Keep fixture imports out of production parser sources so Docker builds do
 not need those test-only files.
+Test and fuzz Run steps are explicitly uncached: every invocation executes them,
+including when Linux CI restores compiled artifacts from a previous run.
 The artificial socket implementation drives **the production Connection engine**;
 it substitutes recv/send/connect/shutdown operations, not state transitions.
 

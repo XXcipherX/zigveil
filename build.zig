@@ -32,7 +32,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addOptions("build_options", options);
-    b.step("test", "Run parser, pool and deterministic connection tests").dependOn(&b.addRunArtifact(tests).step);
+    const run_tests = b.addRunArtifact(tests);
+    // Reuse compiled artifacts, never a previous run's OS/lifecycle test result.
+    run_tests.has_side_effects = true;
+    b.step("test", "Run parser, pool and deterministic connection tests").dependOn(&run_tests.step);
     const fuzz = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/fuzz.zig"),
@@ -41,7 +44,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     fuzz.root_module.addOptions("build_options", options);
-    b.step("fuzz", "Run bounded parser corpus/mutation checks (no external tools)").dependOn(&b.addRunArtifact(fuzz).step);
+    const run_fuzz = b.addRunArtifact(fuzz);
+    run_fuzz.has_side_effects = true;
+    b.step("fuzz", "Run bounded parser corpus/mutation checks (no external tools)").dependOn(&run_fuzz.step);
     if (b.option(bool, "bench_tools", "Build optional native Linux benchmark tool") orelse false) {
         const tool = b.addExecutable(.{
             .name = "zigveil-bench",

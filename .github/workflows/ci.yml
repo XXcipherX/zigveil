@@ -36,6 +36,15 @@ jobs:
       ZIGVEIL_CPU: ${{ matrix.cpu }}
     steps:
       - uses: actions/checkout@v7
+      - name: Restore Zig compilation cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            .zig-cache
+            ${{ runner.temp }}/zig-global-cache
+          key: zig-0.17.0-v1-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.cpu }}-${{ github.sha }}
+          restore-keys: |
+            zig-0.17.0-v1-${{ runner.os }}-${{ matrix.arch }}-${{ matrix.cpu }}-
       - name: Zig 0.17.0 from the official release (verified SHA-256)
         id: zig
         shell: bash
@@ -51,6 +60,7 @@ jobs:
           test "$("$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0/zig" version)" = 0.17.0
           "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0/zig" version
           echo "$RUNNER_TEMP/zig-${ZIG_ARCH}-linux-0.17.0" >> "$GITHUB_PATH"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global-cache" >> "$GITHUB_ENV"
       - name: Check formatting
         run: zig fmt --check build.zig src
       - name: Build debug

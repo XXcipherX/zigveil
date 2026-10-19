@@ -38,6 +38,14 @@ Full Linux validation explicitly selects amd64/arm64 baseline and amd64
 x86_64_v3, matching production image profiles. Pass the matrix CPU to every build,
 test, fuzz and optional benchmark-tool build. The default ordinary build is baseline.
 Native images cover fast/safe on amd64/arm64 and amd64-v3; builds also verify PIE.
+Linux CI caches local/global Zig compilation artifacts by compiler release, runner
+OS, architecture and CPU. Per-commit keys can restore earlier compatible entries;
+Zig validates source/options dependencies. Cache misses must build normally.
+Resolve runner.temp in step inputs and export the compiler cache path through
+GITHUB_ENV; runner context is unavailable in job-level env expressions.
+Keep test/fuzz Run.has_side_effects=true so compilation reuse cannot replace actual
+test execution. Bump the cache schema when changing its compatibility assumptions;
+do not cache success statuses or remove any verification mode to improve timings.
 Scratch image builds additionally reject PT_INTERP and DT_NEEDED in the actual
 production ELF. Smoke covers direct CLI/default and explicit config arguments,
 missing/invalid config, Docker hosts and embedded DNS, read-only forwarding,
